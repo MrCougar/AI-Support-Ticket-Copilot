@@ -10,3 +10,6 @@ __pycache__/
 # Local SQLite database (created when the app first runs)
 *.db
 *.db-journal
+
+# Secrets: never commit API keys
+.env

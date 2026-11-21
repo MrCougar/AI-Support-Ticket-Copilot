@@ -1,4 +1,4 @@
-"""Flask web server for the AI Support Ticket Copilot (milestone 1).
+"""Flask web server for the AI Support Ticket Copilot.
 
 Start it with:  python app.py
 Then open:      http://127.0.0.1:5000
@@ -9,6 +9,7 @@ from pathlib import Path
 
 from flask import Flask, jsonify, render_template, request
 
+import ai_drafts
 import database
 
 # tickets.db sits next to this file, whichever folder you start the app from.
@@ -64,6 +65,32 @@ def create_app(database_path=DEFAULT_DATABASE_PATH):
             return jsonify({"error": "The ticket could not be saved. Please try again."}), 500
 
         return jsonify(ticket), 201  # 201 = "Created"
+
+    @app.post("/api/tickets/<int:ticket_id>/draft")
+    def api_generate_draft(ticket_id):
+        """Ask Gemini for a category and draft reply, save both, and send back the updated ticket.
+
+        The draft is only saved for review. Nothing is sent to the customer.
+        """
+        ticket = database.get_ticket(database_path, ticket_id)
+        if ticket is None:
+            return jsonify({"error": f"Ticket #{ticket_id} doesn't exist."}), 404
+
+        try:
+            draft = ai_drafts.generate_draft(ticket["subject"], ticket["message"])
+        except ai_drafts.DraftError as error:
+            # Nothing gets saved, so any earlier draft stays as it was.
+            # The terminal log shows the cause (for example Google's error) but never the API key.
+            app.logger.warning("Draft for ticket %s failed: %s Cause: %r", ticket_id, error, error.__cause__)
+            return jsonify({"error": str(error)}), error.status_code
+
+        try:
+            database.save_draft(database_path, ticket_id, draft["category"], draft["draft_reply"])
+        except sqlite3.Error:
+            app.logger.exception("Saving a draft failed")
+            return jsonify({"error": "The draft could not be saved. Please try again."}), 500
+
+        return jsonify(database.get_ticket(database_path, ticket_id))
 
     return app
 

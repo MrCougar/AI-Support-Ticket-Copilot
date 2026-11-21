@@ -11,7 +11,10 @@ from datetime import datetime, timezone
 
 
 def init_db(database_path):
-    """Create the tickets table on the first run. Later runs keep the existing table and its tickets."""
+    """Create the tickets table on the first run, and add newer columns to older databases.
+
+    Existing tickets are never deleted: ALTER TABLE only adds new, empty columns.
+    """
     with closing(sqlite3.connect(database_path)) as connection:
         connection.execute(
             """
@@ -23,6 +26,16 @@ def init_db(database_path):
             )
             """
         )
+
+        # Milestone 2 added AI drafts. Databases made before that don't have these columns,
+        # so add them now. Old tickets keep all their data; the new columns start empty (NULL).
+        # PRAGMA table_info returns one row per column, and row[1] is the column's name.
+        column_names = [row[1] for row in connection.execute("PRAGMA table_info(tickets)")]
+        if "category" not in column_names:
+            connection.execute("ALTER TABLE tickets ADD COLUMN category TEXT")
+        if "draft_reply" not in column_names:
+            connection.execute("ALTER TABLE tickets ADD COLUMN draft_reply TEXT")
+
         connection.commit()
 
 
@@ -41,12 +54,24 @@ def create_ticket(database_path, subject, message):
         connection.commit()  # Without this, the new row would be thrown away.
         ticket_id = cursor.lastrowid  # The id SQLite just gave the new ticket.
 
-    return {
-        "id": ticket_id,
-        "subject": subject,
-        "message": message,
-        "created_at": created_at,
-    }
+    # Read the new ticket back so it has the same fields as every other ticket
+    # (category and draft_reply are None until a draft is generated).
+    return get_ticket(database_path, ticket_id)
+
+
+def get_ticket(database_path, ticket_id):
+    """Return one ticket as a dictionary, or None if no ticket has that id."""
+    with closing(sqlite3.connect(database_path)) as connection:
+        connection.row_factory = sqlite3.Row  # Lets the row be turned into a dict below.
+        row = connection.execute(
+            "SELECT id, subject, message, created_at, category, draft_reply "
+            "FROM tickets WHERE id = ?",
+            (ticket_id,),
+        ).fetchone()
+
+    if row is None:
+        return None
+    return dict(row)
 
 
 def list_tickets(database_path):
@@ -56,8 +81,19 @@ def list_tickets(database_path):
         rows = connection.execute(
             # Newest first. If two tickets were created in the same second,
             # the one with the higher id was saved later.
-            "SELECT id, subject, message, created_at FROM tickets "
+            "SELECT id, subject, message, created_at, category, draft_reply FROM tickets "
             "ORDER BY created_at DESC, id DESC"
         ).fetchall()
 
     return [dict(row) for row in rows]
+
+
+def save_draft(database_path, ticket_id, category, draft_reply):
+    """Save a category and draft reply on a ticket, replacing any earlier draft."""
+    with closing(sqlite3.connect(database_path)) as connection:
+        # One UPDATE writes both fields at once, so a category and its draft always belong together.
+        connection.execute(
+            "UPDATE tickets SET category = ?, draft_reply = ? WHERE id = ?",
+            (category, draft_reply, ticket_id),
+        )
+        connection.commit()

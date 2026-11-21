@@ -7,6 +7,9 @@
   --border: #d8dde6;
   --accent: #2456d3;
   --accent-dark: #1b43a8;
+  --accent-soft: #e8eefc;
+  --draft-bg: #f7f9ff;
+  --draft-border: #9fb4ea;
   --error-text: #b42318;
   --error-bg: #fef3f2;
   --success-text: #067647;
@@ -195,4 +198,63 @@ button:disabled {
   margin: 0;
   white-space: pre-wrap; /* keep the customer's line breaks */
   overflow-wrap: anywhere; /* wrap very long words and links */
+}
+
+/* ---------- AI drafts ---------- */
+
+.draft-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-top: 12px;
+}
+
+.draft-controls .status {
+  flex: 1 1 220px; /* the message sits next to the button, or wraps below it */
+}
+
+.draft-button {
+  padding: 6px 14px;
+  font-size: 0.9rem;
+  color: var(--accent);
+  background: #fff;
+  border: 1px solid var(--accent);
+}
+
+.draft-button:hover {
+  background: var(--accent-soft);
+}
+
+.draft {
+  margin-top: 12px;
+  padding: 12px 14px;
+  background: var(--draft-bg);
+  border: 1px dashed var(--draft-border); /* dashed = still a draft, not sent */
+  border-radius: 8px;
+}
+
+.draft-label {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 12px;
+  margin: 0 0 6px;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--accent-dark);
+}
+
+.draft-category {
+  padding: 1px 10px;
+  font-weight: 600;
+  background: var(--accent-soft);
+  border-radius: 999px;
+}
+
+.draft-reply {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
