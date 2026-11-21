@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Support Ticket Copilot</title>
+  <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header class="page-header">
+    <h1>AI Support Ticket Copilot</h1>
+    <p>Log a customer ticket and it appears in the inbox.</p>
+  </header>
+
+  <main class="layout">
+    <!-- The form. static/app.js sends it to POST /api/tickets. -->
+    <section class="panel" aria-labelledby="new-ticket-heading">
+      <h2 id="new-ticket-heading">New ticket</h2>
+
+      <form id="ticket-form">
+        <label for="subject">Subject</label>
+        <input id="subject" name="subject" type="text" placeholder="e.g. Can't reset my password" required>
+
+        <label for="message">Customer message</label>
+        <textarea id="message" name="message" rows="7" placeholder="What did the customer write?" required></textarea>
+
+        <button id="submit-button" type="submit">Submit ticket</button>
+
+        <!-- static/app.js shows success and error messages here. -->
+        <p id="form-status" class="status" role="status"></p>
+      </form>
+    </section>
+
+    <!-- The inbox. static/app.js fills the list from GET /api/tickets. -->
+    <section class="panel" aria-labelledby="inbox-heading">
+      <h2 id="inbox-heading">Inbox</h2>
+      <p id="inbox-status" class="status">Loading tickets…</p>
+      <ul id="ticket-list" class="ticket-list"></ul>
+    </section>
+  </main>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

@@ -1,0 +1,198 @@
+/* Colors used across the page. Change them here to restyle everything. */
+:root {
+  --page-bg: #f3f5f9;
+  --panel-bg: #ffffff;
+  --text: #1d2433;
+  --muted: #5b6577;
+  --border: #d8dde6;
+  --accent: #2456d3;
+  --accent-dark: #1b43a8;
+  --error-text: #b42318;
+  --error-bg: #fef3f2;
+  --success-text: #067647;
+  --success-bg: #ecfdf3;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--page-bg);
+}
+
+/* ---------- Page header ---------- */
+
+.page-header {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 32px 20px 0;
+}
+
+.page-header h1 {
+  margin: 0;
+  font-size: 1.75rem;
+}
+
+.page-header p {
+  margin: 4px 0 0;
+  color: var(--muted);
+}
+
+/* ---------- Layout: form on the left, inbox on the right ---------- */
+
+.layout {
+  display: grid;
+  grid-template-columns: 360px minmax(0, 1fr);
+  gap: 24px;
+  align-items: start;
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 24px 20px 48px;
+}
+
+/* On narrow screens, put the form above the inbox. */
+@media (max-width: 800px) {
+  .layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.panel {
+  padding: 24px;
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.panel h2 {
+  margin: 0 0 16px;
+  font-size: 1.2rem;
+}
+
+/* ---------- Form ---------- */
+
+label {
+  display: block;
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+
+input,
+textarea {
+  display: block;
+  width: 100%;
+  margin-bottom: 16px;
+  padding: 10px 12px;
+  font: inherit;
+  color: inherit;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+textarea {
+  min-height: 150px;
+  resize: vertical;
+}
+
+input:focus,
+textarea:focus {
+  border-color: var(--accent);
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+button {
+  padding: 10px 20px;
+  font: inherit;
+  font-weight: 600;
+  color: #fff;
+  background: var(--accent);
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+button:hover {
+  background: var(--accent-dark);
+}
+
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+/* ---------- Status messages (written by app.js) ---------- */
+
+.status {
+  margin: 0;
+  color: var(--muted);
+}
+
+.status:empty {
+  display: none; /* hide the line when there is no message */
+}
+
+#form-status {
+  margin-top: 16px;
+}
+
+.status.error,
+.status.success {
+  padding: 10px 12px;
+  border-radius: 8px;
+}
+
+.status.error {
+  color: var(--error-text);
+  background: var(--error-bg);
+}
+
+.status.success {
+  color: var(--success-text);
+  background: var(--success-bg);
+}
+
+/* ---------- Inbox ---------- */
+
+.ticket-list {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ticket {
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.ticket h3 {
+  margin: 0;
+  font-size: 1rem;
+  overflow-wrap: anywhere;
+}
+
+.ticket-details {
+  margin: 2px 0 8px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.ticket-message {
+  margin: 0;
+  white-space: pre-wrap; /* keep the customer's line breaks */
+  overflow-wrap: anywhere; /* wrap very long words and links */
+}
