@@ -36,6 +36,14 @@ def init_db(database_path):
         if "draft_reply" not in column_names:
             connection.execute("ALTER TABLE tickets ADD COLUMN draft_reply TEXT")
 
+        # Milestone 3 added human approval. Existing tickets start as "Open" with no approved
+        # reply, so their saved drafts are ready for review. draft_reply keeps Gemini's original
+        # draft, and approved_reply will hold the agent's final text, so the two can be compared.
+        if "status" not in column_names:
+            connection.execute("ALTER TABLE tickets ADD COLUMN status TEXT NOT NULL DEFAULT 'Open'")
+        if "approved_reply" not in column_names:
+            connection.execute("ALTER TABLE tickets ADD COLUMN approved_reply TEXT")
+
         connection.commit()
 
 
@@ -55,7 +63,7 @@ def create_ticket(database_path, subject, message):
         ticket_id = cursor.lastrowid  # The id SQLite just gave the new ticket.
 
     # Read the new ticket back so it has the same fields as every other ticket
-    # (category and draft_reply are None until a draft is generated).
+    # (status starts as "Open", and the draft and approval fields are None).
     return get_ticket(database_path, ticket_id)
 
 
@@ -64,7 +72,7 @@ def get_ticket(database_path, ticket_id):
     with closing(sqlite3.connect(database_path)) as connection:
         connection.row_factory = sqlite3.Row  # Lets the row be turned into a dict below.
         row = connection.execute(
-            "SELECT id, subject, message, created_at, category, draft_reply "
+            "SELECT id, subject, message, created_at, category, draft_reply, status, approved_reply "
             "FROM tickets WHERE id = ?",
             (ticket_id,),
         ).fetchone()
@@ -81,19 +89,41 @@ def list_tickets(database_path):
         rows = connection.execute(
             # Newest first. If two tickets were created in the same second,
             # the one with the higher id was saved later.
-            "SELECT id, subject, message, created_at, category, draft_reply FROM tickets "
-            "ORDER BY created_at DESC, id DESC"
+            "SELECT id, subject, message, created_at, category, draft_reply, status, approved_reply "
+            "FROM tickets ORDER BY created_at DESC, id DESC"
         ).fetchall()
 
     return [dict(row) for row in rows]
 
 
 def save_draft(database_path, ticket_id, category, draft_reply):
-    """Save a category and draft reply on a ticket, replacing any earlier draft."""
+    """Save a category and draft reply on a ticket, replacing any earlier draft.
+
+    Returns True if it was saved. Returns False, and changes nothing, if the ticket is Approved.
+    """
     with closing(sqlite3.connect(database_path)) as connection:
         # One UPDATE writes both fields at once, so a category and its draft always belong together.
-        connection.execute(
-            "UPDATE tickets SET category = ?, draft_reply = ? WHERE id = ?",
+        # "status != 'Approved'" protects an approval, even one made while Gemini was still writing.
+        cursor = connection.execute(
+            "UPDATE tickets SET category = ?, draft_reply = ? WHERE id = ? AND status != 'Approved'",
             (category, draft_reply, ticket_id),
         )
         connection.commit()
+        return cursor.rowcount == 1  # rowcount is how many rows the UPDATE changed
+
+
+def approve_reply(database_path, ticket_id, approved_reply):
+    """Save the agent's final reply exactly as given, and mark the ticket Approved.
+
+    Gemini's original draft_reply is left as it was. Returns True if it was saved.
+    Returns False, and changes nothing, if the ticket has no draft or is already Approved.
+    """
+    with closing(sqlite3.connect(database_path)) as connection:
+        # One UPDATE sets the reply and the status together, so an approved ticket always has its reply.
+        cursor = connection.execute(
+            "UPDATE tickets SET approved_reply = ?, status = 'Approved' "
+            "WHERE id = ? AND draft_reply IS NOT NULL AND status != 'Approved'",
+            (approved_reply, ticket_id),
+        )
+        connection.commit()
+        return cursor.rowcount == 1

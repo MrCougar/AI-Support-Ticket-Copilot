@@ -1,7 +1,8 @@
 // static/app.js runs in the browser. It talks to the Flask routes in app.py:
-//   GET  /api/tickets             -> load the inbox
-//   POST /api/tickets             -> save a new ticket
-//   POST /api/tickets/<id>/draft  -> have the server ask Gemini for a draft reply
+//   GET  /api/tickets               -> load the inbox
+//   POST /api/tickets               -> save a new ticket
+//   POST /api/tickets/<id>/draft    -> have the server ask Gemini for a draft reply
+//   POST /api/tickets/<id>/approve  -> save the agent's edited reply and mark the ticket Approved
 
 // The page elements this script uses (their ids are in templates/index.html).
 const form = document.getElementById("ticket-form");
@@ -12,9 +13,14 @@ const formStatus = document.getElementById("form-status");
 const inboxStatus = document.getElementById("inbox-status");
 const ticketList = document.getElementById("ticket-list");
 
-// Ids of tickets whose draft is being generated right now. createTicketItem() checks this,
-// so a ticket's button stays disabled even if the inbox is redrawn while Gemini works.
-const draftsInProgress = new Set();
+// Tickets waiting for the server, and the message to show meanwhile (for example
+// 3 -> "Generating draft…"). createTicketItem() checks this, so a busy ticket keeps its
+// buttons disabled even if the inbox is redrawn while it waits.
+const ticketsInProgress = new Map();
+
+// Replies the agent has edited but not approved yet (ticket id -> text). The inbox is
+// redrawn after every new ticket, and this keeps the typed text from being lost.
+const unsavedReplies = new Map();
 
 // Ask the server for every ticket and draw them in the inbox.
 async function loadTickets() {
@@ -45,12 +51,12 @@ function showTickets(tickets) {
   }
 }
 
-// Build the <li> for one ticket. We use textContent (never innerHTML), so whatever the
-// customer typed, or Gemini wrote, is shown as plain text and something like <script> can't run.
+// Build the <li> for one ticket. We use textContent and .value (never innerHTML), so whatever
+// the customer typed, Gemini wrote, or the agent edited is shown as plain text and can't run.
 function createTicketItem(ticket) {
   const item = document.createElement("li");
   item.className = "ticket";
-  item.id = `ticket-${ticket.id}`; // lets generateDraft() find this ticket's card later
+  item.id = `ticket-${ticket.id}`; // lets generateDraft() and approveReply() find this card later
 
   const subject = document.createElement("h3");
   subject.textContent = ticket.subject;
@@ -67,91 +73,134 @@ function createTicketItem(ticket) {
   message.className = "ticket-message";
   message.textContent = ticket.message;
 
-  item.append(subject, details, message, createDraftControls(ticket));
+  item.append(subject, details, message);
 
-  // A saved draft comes back with the ticket from GET /api/tickets,
-  // so refreshing the page shows it again without calling Gemini.
-  if (ticket.draft_reply) {
-    item.append(createDraftBox(ticket));
+  // Saved drafts and approvals come back with the ticket from GET /api/tickets,
+  // so refreshing the page shows them again without calling Gemini.
+  if (ticket.status === "Approved") {
+    item.append(createApprovedBox(ticket));
+  } else if (ticket.draft_reply) {
+    item.append(createReviewBox(ticket));
+  }
+  item.append(createTicketActions(ticket));
+
+  // Still waiting for the server (the inbox was redrawn meanwhile), so stay disabled.
+  if (ticketsInProgress.has(ticket.id)) {
+    setTicketBusy(item, true);
+    showStatus(item.querySelector(".ticket-actions .status"), ticketsInProgress.get(ticket.id), "");
   }
   return item;
 }
 
-// The Generate draft button and the status line next to it.
-function createDraftControls(ticket) {
-  const controls = document.createElement("div");
-  controls.className = "draft-controls";
-
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "draft-button";
-  button.textContent = ticket.draft_reply ? "Regenerate draft" : "Generate draft";
-  button.addEventListener("click", () => generateDraft(ticket.id));
-
-  const status = document.createElement("p");
-  status.className = "status";
-  status.setAttribute("role", "status");
-
-  if (draftsInProgress.has(ticket.id)) {
-    button.disabled = true;
-    showStatus(status, "Generating draft…", "");
-  }
-
-  controls.append(button, status);
-  return controls;
-}
-
-// The saved category and draft, labelled "Draft for review". It is only shown here:
-// nothing in this app sends it to the customer.
-function createDraftBox(ticket) {
+// A draft waiting for review. The agent can edit the reply here, then approve it.
+function createReviewBox(ticket) {
   const box = document.createElement("div");
   box.className = "draft";
 
-  const label = document.createElement("p");
-  label.className = "draft-label";
-  label.textContent = "Draft for review";
+  const editor = document.createElement("textarea");
+  editor.className = "reply-editor";
+  editor.rows = 8;
+  editor.setAttribute("aria-label", `Reply for ticket #${ticket.id}`);
+  // Start from the agent's unsaved edits if there are any, otherwise from Gemini's draft.
+  editor.value = unsavedReplies.has(ticket.id) ? unsavedReplies.get(ticket.id) : ticket.draft_reply;
+  editor.addEventListener("input", () => unsavedReplies.set(ticket.id, editor.value));
 
-  const category = document.createElement("span");
-  category.className = "draft-category";
-  category.textContent = `Category: ${ticket.category}`;
-  label.append(category);
-
-  const reply = document.createElement("p");
-  reply.className = "draft-reply";
-  reply.textContent = ticket.draft_reply;
-
-  box.append(label, reply);
+  box.append(createReplyLabel("Draft for review", ticket.category), editor);
   return box;
 }
 
-// Runs when a ticket's Generate draft button is clicked.
+// An approved reply: read-only text labelled "Approved". Approving only saved it in this app.
+function createApprovedBox(ticket) {
+  const box = document.createElement("div");
+  box.className = "draft approved";
+
+  const reply = document.createElement("p");
+  reply.className = "draft-reply";
+  reply.textContent = ticket.approved_reply;
+
+  const note = document.createElement("p");
+  note.className = "reply-note";
+  note.textContent = "Approved in this app only. Nothing has been sent to the customer.";
+
+  box.append(createReplyLabel("Approved", ticket.category), reply, note);
+  return box;
+}
+
+// The top line of a reply box: its label on the left, the category on the right.
+function createReplyLabel(text, category) {
+  const label = document.createElement("p");
+  label.className = "draft-label";
+  label.textContent = text;
+
+  const categoryTag = document.createElement("span");
+  categoryTag.className = "draft-category";
+  categoryTag.textContent = `Category: ${category}`;
+  label.append(categoryTag);
+  return label;
+}
+
+// The buttons under a ticket, and its status line. Approved tickets get no buttons:
+// their reply is final, and the server refuses new drafts for them too.
+function createTicketActions(ticket) {
+  const actions = document.createElement("div");
+  actions.className = "ticket-actions";
+
+  if (ticket.status !== "Approved") {
+    if (ticket.draft_reply) {
+      const approveButton = document.createElement("button");
+      approveButton.type = "button";
+      approveButton.className = "approve-button";
+      approveButton.textContent = "Approve reply";
+      approveButton.addEventListener("click", () => approveReply(ticket.id));
+      actions.append(approveButton);
+    }
+
+    const draftButton = document.createElement("button");
+    draftButton.type = "button";
+    draftButton.className = "draft-button";
+    draftButton.textContent = ticket.draft_reply ? "Regenerate draft" : "Generate draft";
+    draftButton.addEventListener("click", () => generateDraft(ticket.id));
+    actions.append(draftButton);
+  }
+
+  const statusLine = document.createElement("p");
+  statusLine.className = "status";
+  statusLine.setAttribute("role", "status");
+  actions.append(statusLine);
+  return actions;
+}
+
+// Runs when a ticket's Generate draft (or Regenerate draft) button is clicked.
 async function generateDraft(ticketId) {
-  draftsInProgress.add(ticketId);
-  showDraftStatus(ticketId, "Generating draft…", ""); // this also disables the button
+  // A new draft replaces the text in the editor, so ask before throwing away the agent's edits.
+  if (unsavedReplies.has(ticketId) && !confirm("Replace your edited reply with a new draft?")) {
+    return;
+  }
+
+  ticketsInProgress.set(ticketId, "Generating draft…");
+  showTicketStatus(ticketId, "Generating draft…", ""); // this also disables the ticket's buttons
 
   try {
     const response = await fetch(`/api/tickets/${ticketId}/draft`, { method: "POST" });
     const result = await response.json();
-    draftsInProgress.delete(ticketId);
+    ticketsInProgress.delete(ticketId);
 
     if (!response.ok) {
-      // For example: no API key, quota reached, or Gemini failed. The server saved
-      // nothing, so the card still shows the earlier draft (if there was one).
-      showDraftStatus(ticketId, result.error || "The draft could not be generated.", "error");
+      // For example: no API key, quota reached, Gemini failed, or the ticket is already approved.
+      // The server saved nothing, so the card still shows what it showed before.
+      showTicketStatus(ticketId, result.error || "The draft could not be generated.", "error");
       return;
     }
 
-    // Saved. Draw this ticket's card again so it shows the new draft.
-    const card = document.getElementById(`ticket-${ticketId}`);
-    if (card) {
-      card.replaceWith(createTicketItem(result));
-    }
-    showDraftStatus(ticketId, "Draft saved for review. Nothing was sent to the customer.", "success");
+    // Saved. Draw this ticket's card again so the editor shows the new draft.
+    unsavedReplies.delete(ticketId);
+    replaceTicketCard(result);
+    showTicketStatus(ticketId, "Draft saved for review. Nothing was sent to the customer.", "success");
   } catch (error) {
     // No usable reply (for example, the server is stopped). Any earlier draft stays as it was.
     console.error(error);
-    draftsInProgress.delete(ticketId);
-    showDraftStatus(
+    ticketsInProgress.delete(ticketId);
+    showTicketStatus(
       ticketId,
       "Something went wrong, so no new draft was saved. Check that the server is running and try again.",
       "error",
@@ -159,14 +208,74 @@ async function generateDraft(ticketId) {
   }
 }
 
-// Update the button and the status line on one ticket's card.
-function showDraftStatus(ticketId, text, kind) {
+// Runs when a ticket's Approve reply button is clicked: save exactly what is in its editor.
+async function approveReply(ticketId) {
+  const card = document.getElementById(`ticket-${ticketId}`);
+  const approvedReply = card.querySelector(".reply-editor").value;
+
+  ticketsInProgress.set(ticketId, "Approving reply…");
+  showTicketStatus(ticketId, "Approving reply…", ""); // disables the buttons and locks the editor
+
+  try {
+    const response = await fetch(`/api/tickets/${ticketId}/approve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ approved_reply: approvedReply }),
+    });
+    const result = await response.json();
+    ticketsInProgress.delete(ticketId);
+
+    if (!response.ok) {
+      // For example, a blank reply. The editor still holds the agent's text, ready to fix and retry.
+      showTicketStatus(ticketId, result.error || "The reply could not be approved.", "error");
+      return;
+    }
+
+    // Approved. Draw the card again: the reply is now read-only and labelled "Approved".
+    unsavedReplies.delete(ticketId);
+    replaceTicketCard(result);
+    showTicketStatus(ticketId, "Reply approved and saved.", "success");
+  } catch (error) {
+    // No usable reply (for example, the server is stopped). The editor still holds the text.
+    console.error(error);
+    ticketsInProgress.delete(ticketId);
+    showTicketStatus(
+      ticketId,
+      "Something went wrong, so the reply wasn't approved. Your text is still here: " +
+        "check that the server is running and try again.",
+      "error",
+    );
+  }
+}
+
+// Swap one ticket's card for a freshly drawn one, using the ticket the server sent back.
+function replaceTicketCard(ticket) {
+  const card = document.getElementById(`ticket-${ticket.id}`);
+  if (card) {
+    card.replaceWith(createTicketItem(ticket));
+  }
+}
+
+// Update one ticket's card: enable or disable its buttons and editor, and set its status line.
+function showTicketStatus(ticketId, text, kind) {
   const card = document.getElementById(`ticket-${ticketId}`);
   if (!card) {
     return; // the ticket isn't on the page right now
   }
-  card.querySelector(".draft-button").disabled = draftsInProgress.has(ticketId);
-  showStatus(card.querySelector(".draft-controls .status"), text, kind);
+  setTicketBusy(card, ticketsInProgress.has(ticketId));
+  showStatus(card.querySelector(".ticket-actions .status"), text, kind);
+}
+
+// While a ticket waits for the server, its buttons are disabled and its editor is locked,
+// so the text being saved can't change halfway.
+function setTicketBusy(card, busy) {
+  for (const button of card.querySelectorAll(".ticket-actions button")) {
+    button.disabled = busy;
+  }
+  const editor = card.querySelector(".reply-editor");
+  if (editor) {
+    editor.readOnly = busy;
+  }
 }
 
 // Runs when the Submit ticket button is clicked: send the form to the server as JSON.

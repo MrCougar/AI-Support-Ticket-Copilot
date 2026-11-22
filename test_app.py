@@ -1,4 +1,4 @@
-"""Tests for creating, validating, and listing tickets, and for generating drafts.
+"""Tests for creating, validating, and listing tickets, generating drafts, and approving replies.
 
 Run them with:  python -m pytest
 
@@ -197,6 +197,7 @@ class FakeGemini:
         self.error = None
         self.client_options = []  # what the app passed to genai.Client(...)
         self.requests = []  # what the app passed to generate_content(...)
+        self.while_generating = None  # optional function to run while "Gemini" is writing
         self.models = self  # so that client.models.generate_content(...) works
 
     def make_client(self, **options):
@@ -211,6 +212,8 @@ class FakeGemini:
 
     def generate_content(self, *, model, contents, config):
         self.requests.append({"model": model, "contents": contents, "config": config})
+        if self.while_generating:
+            self.while_generating()
         if self.error:
             raise self.error
         # A real response object from the SDK, so response.text works exactly like it does live.
@@ -397,7 +400,178 @@ def test_a_milestone_1_database_is_upgraded_without_losing_tickets(tmp_path, fak
             "created_at": "2026-11-01T09:00:00+00:00",
             "category": None,
             "draft_reply": None,
+            "status": "Open",
+            "approved_reply": None,
         }
     ]
     # The upgraded ticket can get a draft like any other.
     assert client.post("/api/tickets/1/draft").status_code == 200
+
+
+# ---------- Review and approval (milestone 3) ----------
+
+
+def add_ticket_with_draft(client):
+    """Create a ticket, give it a simulated Gemini draft, and return its id."""
+    ticket_id = add_ticket(client)
+    client.post(f"/api/tickets/{ticket_id}/draft")
+    return ticket_id
+
+
+def test_approving_saves_the_edited_text_exactly_and_keeps_the_gemini_draft(client, fake_gemini):
+    ticket_id = add_ticket_with_draft(client)
+    # The agent's edit, ending with a line break: it must be saved exactly as typed, not trimmed.
+    edited_reply = (
+        "Hi Sam,\n\nSorry about the double charge on order 1042. Could you send the dates of both "
+        "charges so the billing team can check them?\n\nBest regards,\nThe Support Team\n"
+    )
+
+    response = client.post(f"/api/tickets/{ticket_id}/approve", json={"approved_reply": edited_reply})
+
+    assert response.status_code == 200
+    ticket = response.get_json()
+    assert ticket["status"] == "Approved"
+    assert ticket["approved_reply"] == edited_reply
+    # Gemini's original draft and category are kept, so they can be compared later.
+    assert ticket["draft_reply"] == SIMULATED_DRAFT["draft_reply"]
+    assert ticket["category"] == "Billing"
+    # Refreshing the inbox shows the approval, and approving never called Gemini.
+    assert client.get("/api/tickets").get_json() == [ticket]
+    assert len(fake_gemini.requests) == 1  # only the request that made the draft
+
+
+@pytest.mark.parametrize(
+    "body, expected_error",
+    [
+        ({"approved_reply": ""}, "Reply cannot be blank."),
+        ({"approved_reply": " \n\t \n"}, "Reply cannot be blank."),
+        ({}, "Reply cannot be blank."),
+        ({"approved_reply": 42}, "Reply cannot be blank."),
+        (["Hi there"], "Send the reply as a JSON object."),
+    ],
+    ids=["empty", "whitespace-only", "missing", "not-text", "not-an-object"],
+)
+def test_a_blank_reply_is_rejected(client, fake_gemini, body, expected_error):
+    ticket_id = add_ticket_with_draft(client)
+    before = client.get("/api/tickets").get_json()
+
+    response = client.post(f"/api/tickets/{ticket_id}/approve", json=body)
+
+    assert response.status_code == 400
+    assert response.get_json() == {"error": expected_error}
+    assert client.get("/api/tickets").get_json() == before  # still Open, with its draft unchanged
+
+
+def test_an_approved_ticket_cannot_get_a_new_draft(client, fake_gemini):
+    ticket_id = add_ticket_with_draft(client)
+    approved = client.post(f"/api/tickets/{ticket_id}/approve", json={"approved_reply": "Approved text"})
+    fake_gemini.reply_text = json.dumps({"category": "Technical", "draft_reply": "A different draft"})
+
+    response = client.post(f"/api/tickets/{ticket_id}/draft")
+
+    assert response.status_code == 409
+    assert response.get_json() == {"error": f"Ticket #{ticket_id} is already approved, so it can't get a new draft."}
+    assert len(fake_gemini.requests) == 1  # Gemini wasn't asked again
+    assert client.get("/api/tickets").get_json() == [approved.get_json()]  # nothing changed
+
+
+def test_a_draft_that_finishes_after_approval_does_not_replace_it(client, fake_gemini, tmp_path):
+    ticket_id = add_ticket_with_draft(client)
+    fake_gemini.reply_text = json.dumps({"category": "Technical", "draft_reply": "A newer draft"})
+    # Someone approves the reply (say, in another browser tab) while Gemini is still writing.
+    fake_gemini.while_generating = lambda: database.approve_reply(tmp_path / "test.db", ticket_id, "Approved text")
+
+    response = client.post(f"/api/tickets/{ticket_id}/draft")
+
+    assert response.status_code == 409
+    assert "was approved while Gemini was writing" in response.get_json()["error"]
+    ticket = client.get("/api/tickets").get_json()[0]
+    assert ticket["status"] == "Approved"
+    assert ticket["approved_reply"] == "Approved text"
+    assert ticket["draft_reply"] == SIMULATED_DRAFT["draft_reply"]  # the newer draft wasn't saved
+    assert ticket["category"] == "Billing"
+
+
+def test_a_reply_is_approved_once_and_only_after_a_draft(client, fake_gemini):
+    missing = client.post("/api/tickets/999/approve", json={"approved_reply": "Hello"})
+    assert missing.status_code == 404
+    assert missing.get_json() == {"error": "Ticket #999 doesn't exist."}
+
+    ticket_id = add_ticket(client)
+    no_draft = client.post(f"/api/tickets/{ticket_id}/approve", json={"approved_reply": "Hello"})
+    assert no_draft.status_code == 409
+    assert "has no draft to approve yet" in no_draft.get_json()["error"]
+
+    client.post(f"/api/tickets/{ticket_id}/draft")
+    first = client.post(f"/api/tickets/{ticket_id}/approve", json={"approved_reply": "First approval"})
+    second = client.post(f"/api/tickets/{ticket_id}/approve", json={"approved_reply": "Second approval"})
+
+    assert first.status_code == 200
+    assert second.status_code == 409
+    assert "is already approved" in second.get_json()["error"]
+    assert client.get("/api/tickets").get_json() == [first.get_json()]  # the first approval stands
+
+
+def test_a_database_failure_while_approving_returns_an_error_message(client, fake_gemini, monkeypatch):
+    ticket_id = add_ticket_with_draft(client)
+
+    def broken_approve_reply(*args):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(database, "approve_reply", broken_approve_reply)
+
+    response = client.post(f"/api/tickets/{ticket_id}/approve", json={"approved_reply": "Hello"})
+
+    assert response.status_code == 500
+    assert response.get_json() == {"error": "The approval could not be saved. Please try again."}
+
+
+def test_a_milestone_2_database_keeps_its_drafts_ready_for_review(tmp_path, fake_gemini):
+    database_path = tmp_path / "tickets.db"
+    # Build a database exactly the way milestone 2 did: drafts, but no approval columns.
+    with closing(sqlite3.connect(database_path)) as connection:
+        connection.execute(
+            "CREATE TABLE tickets (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "subject TEXT NOT NULL, message TEXT NOT NULL, created_at TEXT NOT NULL)"
+        )
+        connection.execute("ALTER TABLE tickets ADD COLUMN category TEXT")
+        connection.execute("ALTER TABLE tickets ADD COLUMN draft_reply TEXT")
+        connection.execute(
+            "INSERT INTO tickets (subject, message, created_at, category, draft_reply) VALUES (?, ?, ?, ?, ?)",
+            ("Charged twice", "Order 1042.", "2026-11-20T09:00:00+00:00", "Billing", "Hi there, a saved draft."),
+        )
+        connection.execute(
+            "INSERT INTO tickets (subject, message, created_at) VALUES (?, ?, ?)",
+            ("No draft yet", "Saved without a draft.", "2026-11-21T09:00:00+00:00"),
+        )
+        connection.commit()
+
+    create_app(database_path)  # starting the app adds the approval columns
+    client = create_app(database_path).test_client()  # starting it again must not fail or lose data
+
+    assert client.get("/api/tickets").get_json() == [
+        {
+            "id": 2,
+            "subject": "No draft yet",
+            "message": "Saved without a draft.",
+            "created_at": "2026-11-21T09:00:00+00:00",
+            "category": None,
+            "draft_reply": None,
+            "status": "Open",
+            "approved_reply": None,
+        },
+        {
+            "id": 1,
+            "subject": "Charged twice",
+            "message": "Order 1042.",
+            "created_at": "2026-11-20T09:00:00+00:00",
+            "category": "Billing",
+            "draft_reply": "Hi there, a saved draft.",
+            "status": "Open",
+            "approved_reply": None,
+        },
+    ]
+    # The saved draft is ready for review: it can be approved straight away.
+    response = client.post("/api/tickets/1/approve", json={"approved_reply": "Hi there, a saved draft."})
+    assert response.get_json()["status"] == "Approved"
+    assert fake_gemini.requests == []  # none of this called Gemini

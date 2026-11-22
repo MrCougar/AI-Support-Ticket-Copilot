@@ -10,6 +10,9 @@
   --accent-soft: #e8eefc;
   --draft-bg: #f7f9ff;
   --draft-border: #9fb4ea;
+  --approved-bg: #f5fcf8;
+  --approved-border: #7cc39b;
+  --approved-soft: #dcf3e5;
   --error-text: #b42318;
   --error-bg: #fef3f2;
   --success-text: #067647;
@@ -200,9 +203,9 @@ button:disabled {
   overflow-wrap: anywhere; /* wrap very long words and links */
 }
 
-/* ---------- AI drafts ---------- */
+/* ---------- AI drafts, review, and approval ---------- */
 
-.draft-controls {
+.ticket-actions {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -210,16 +213,25 @@ button:disabled {
   margin-top: 12px;
 }
 
-.draft-controls .status {
-  flex: 1 1 220px; /* the message sits next to the button, or wraps below it */
+.ticket-actions .status {
+  flex: 1 1 220px; /* the message sits next to the buttons, or wraps below them */
 }
 
+.approve-button,
 .draft-button {
   padding: 6px 14px;
   font-size: 0.9rem;
+  border: 1px solid var(--accent); /* both buttons get a border, so they're the same height */
+}
+
+.approve-button:hover {
+  border-color: var(--accent-dark); /* matches the darker background from button:hover */
+}
+
+/* Generate/Regenerate is the secondary button: outlined instead of filled. */
+.draft-button {
   color: var(--accent);
   background: #fff;
-  border: 1px solid var(--accent);
 }
 
 .draft-button:hover {
@@ -257,4 +269,35 @@ button:disabled {
   margin: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.reply-editor {
+  min-height: 160px;
+  margin: 0;
+  field-sizing: content; /* grow to fit the whole reply (Edge and Chrome; others keep 8 rows) */
+}
+
+.reply-editor:read-only {
+  color: var(--muted);
+  background: var(--draft-bg); /* locked while the reply is being saved */
+}
+
+/* An approved reply uses the same box as a draft, but solid and green: it's final. */
+.draft.approved {
+  background: var(--approved-bg);
+  border: 1px solid var(--approved-border);
+}
+
+.draft.approved .draft-label {
+  color: var(--success-text);
+}
+
+.draft.approved .draft-category {
+  background: var(--approved-soft);
+}
+
+.reply-note {
+  margin: 8px 0 0;
+  font-size: 0.85rem;
+  color: var(--muted);
 }
