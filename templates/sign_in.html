@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in · AI Support Ticket Copilot</title>
+  <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header class="page-header">
+    <h1>AI Support Ticket Copilot</h1>
+    <p>This is a private demo. Sign in with the demo password to open the inbox.</p>
+  </header>
+
+  <main class="sign-in-layout">
+    <section class="panel" aria-labelledby="sign-in-heading">
+      <h2 id="sign-in-heading">Sign in</h2>
+
+      <!-- app.py checks the password against DEMO_PASSWORD_HASH. The hidden csrf_token
+           proves the form came from this page, not from another site. -->
+      <form method="post" action="{{ url_for('sign_in') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+
+        <button type="submit">Sign in</button>
+
+        {% if error %}
+          <p class="status error" role="alert">{{ error }}</p>
+        {% endif %}
+        {% for message in get_flashed_messages() %}
+          <p class="status success" role="status">{{ message }}</p>
+        {% endfor %}
+      </form>
+    </section>
+  </main>
+</body>
+</html>

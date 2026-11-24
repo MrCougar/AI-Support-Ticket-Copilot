@@ -52,6 +52,31 @@ body {
   color: var(--muted);
 }
 
+/* The title on the left, the Sign out button on the right (it wraps below on narrow screens). */
+.page-header-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+}
+
+.page-header form {
+  margin: 0;
+}
+
+/* ---------- Sign-in page ---------- */
+
+.sign-in-layout {
+  max-width: 440px;
+  margin: 0 auto;
+  padding: 24px 20px 48px;
+}
+
+.sign-in-layout .status {
+  margin-top: 16px;
+}
+
 /* ---------- Layout: form on the left, inbox on the right ---------- */
 
 .layout {
@@ -242,7 +267,8 @@ button:disabled {
 
 .approve-button,
 .priority-button,
-.draft-button {
+.draft-button,
+.sign-out-button {
   padding: 6px 14px;
   font-size: 0.9rem;
   border: 1px solid var(--accent); /* every button gets a border, so they're all the same height */
@@ -252,15 +278,17 @@ button:disabled {
   border-color: var(--accent-dark); /* matches the darker background from button:hover */
 }
 
-/* Check priority and Generate/Regenerate are secondary buttons: outlined instead of filled. */
+/* Check priority, Generate/Regenerate, and Sign out are secondary buttons: outlined instead of filled. */
 .priority-button,
-.draft-button {
+.draft-button,
+.sign-out-button {
   color: var(--accent);
   background: #fff;
 }
 
 .priority-button:hover,
-.draft-button:hover {
+.draft-button:hover,
+.sign-out-button:hover {
   background: var(--accent-soft);
 }
 

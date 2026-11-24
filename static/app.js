@@ -4,6 +4,7 @@
 //   POST /api/tickets/<id>/draft    -> have the server ask Gemini for a draft reply (then n8n for priority)
 //   POST /api/tickets/<id>/priority -> have the server ask n8n again, using the saved category
 //   POST /api/tickets/<id>/approve  -> save the agent's edited reply and mark the ticket Approved
+// Every request goes through apiFetch() below, which adds the CSRF token.
 
 // The page elements this script uses (their ids are in templates/index.html).
 const form = document.getElementById("ticket-form");
@@ -13,6 +14,21 @@ const submitButton = document.getElementById("submit-button");
 const formStatus = document.getElementById("form-status");
 const inboxStatus = document.getElementById("inbox-status");
 const ticketList = document.getElementById("ticket-list");
+
+// The CSRF token the server put in the page (see templates/index.html). The server refuses
+// any change (POST) that doesn't send it back, so other websites can't act on your behalf.
+const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
+
+// Send a request to the API with the CSRF token. If the sign-in has ended (401), go to the
+// sign-in page instead.
+async function apiFetch(url, options = {}) {
+  const headers = { ...options.headers, "X-CSRFToken": csrfToken };
+  const response = await fetch(url, { ...options, headers });
+  if (response.status === 401) {
+    window.location.assign("/sign-in");
+  }
+  return response;
+}
 
 // Tickets waiting for the server, and the message to show meanwhile (for example
 // 3 -> "Generating draft…"). createTicketItem() checks this, so a busy ticket keeps its
@@ -26,7 +42,7 @@ const unsavedReplies = new Map();
 // Ask the server for every ticket and draw them in the inbox.
 async function loadTickets() {
   try {
-    const response = await fetch("/api/tickets");
+    const response = await apiFetch("/api/tickets");
     if (!response.ok) {
       throw new Error(`GET /api/tickets failed with status ${response.status}`);
     }
@@ -195,7 +211,7 @@ async function generateDraft(ticketId) {
   showTicketStatus(ticketId, "Generating draft…", ""); // this also disables the ticket's buttons
 
   try {
-    const response = await fetch(`/api/tickets/${ticketId}/draft`, { method: "POST" });
+    const response = await apiFetch(`/api/tickets/${ticketId}/draft`, { method: "POST" });
     const result = await response.json();
     ticketsInProgress.delete(ticketId);
 
@@ -250,7 +266,7 @@ async function checkPriority(ticketId) {
   showTicketStatus(ticketId, "Checking priority…", ""); // disables the buttons while n8n answers
 
   try {
-    const response = await fetch(`/api/tickets/${ticketId}/priority`, { method: "POST" });
+    const response = await apiFetch(`/api/tickets/${ticketId}/priority`, { method: "POST" });
     const result = await response.json();
     ticketsInProgress.delete(ticketId);
 
@@ -288,7 +304,7 @@ async function approveReply(ticketId) {
   showTicketStatus(ticketId, "Approving reply…", ""); // disables the buttons and locks the editor
 
   try {
-    const response = await fetch(`/api/tickets/${ticketId}/approve`, {
+    const response = await apiFetch(`/api/tickets/${ticketId}/approve`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ approved_reply: approvedReply }),
@@ -357,7 +373,7 @@ async function submitTicket(event) {
   showStatus(formStatus, "Saving ticket…", "");
 
   try {
-    const response = await fetch("/api/tickets", {
+    const response = await apiFetch("/api/tickets", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({

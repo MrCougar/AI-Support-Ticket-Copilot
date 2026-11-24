@@ -9,9 +9,12 @@ To serve it with Waitress (debugging off), see "Serve with Waitress" in README.m
 
 import os
 import sqlite3
+from datetime import timedelta
 from pathlib import Path
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, flash, jsonify, redirect, render_template, request, session, url_for
+from flask_wtf.csrf import CSRFError, CSRFProtect
+from werkzeug.security import check_password_hash
 
 import ai_drafts
 import database
@@ -30,6 +33,29 @@ def clean_text(value):
     return ""
 
 
+def read_sign_in_settings():
+    """Read SECRET_KEY and DEMO_PASSWORD_HASH from the environment.
+
+    The app refuses to start without both, so it can never run unprotected. Returns both values.
+    """
+    secret_key = os.environ.get("SECRET_KEY", "").strip()
+    password_hash = os.environ.get("DEMO_PASSWORD_HASH", "").strip()
+
+    problems = []
+    if len(secret_key) < 32:
+        problems.append("SECRET_KEY must be set to a random value of at least 32 characters.")
+    # A Werkzeug hash looks like "scrypt:32768:8:1$<salt>$<hash>". The password itself would not.
+    hash_method = password_hash.split(":", 1)[0]
+    if password_hash.count("$") != 2 or hash_method not in ("scrypt", "pbkdf2"):
+        problems.append(
+            "DEMO_PASSWORD_HASH must be set to a password hash made with Werkzeug "
+            "(it starts with scrypt: or pbkdf2:), never the password itself."
+        )
+    if problems:
+        raise RuntimeError(" ".join(problems) + ' See "Sign-in settings" in README.md.')
+    return secret_key, password_hash
+
+
 def create_app(database_path=None):
     """Build the Flask app.
 
@@ -39,8 +65,72 @@ def create_app(database_path=None):
     """
     if database_path is None:
         database_path = os.environ.get("DATABASE_PATH", "").strip() or DEFAULT_DATABASE_PATH
+    secret_key, password_hash = read_sign_in_settings()
+
     app = Flask(__name__)
+    app.config.update(
+        SECRET_KEY=secret_key,  # signs the session cookie, so it can't be forged or edited
+        # The session cookie can't be read by JavaScript or sent along with other sites' requests,
+        # and it is only sent over HTTPS. LOCALHOST_HTTP=1 lifts the HTTPS rule for testing on
+        # http://127.0.0.1 on your own computer. Never set it on a host.
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE="Lax",
+        SESSION_COOKIE_SECURE=os.environ.get("LOCALHOST_HTTP", "").strip() != "1",
+        PERMANENT_SESSION_LIFETIME=timedelta(hours=12),  # then the agent signs in again
+        # CSRF tokens are checked in require_sign_in() below, after the sign-in check, so a
+        # signed-out request always gets 401. A token lasts as long as the sign-in.
+        WTF_CSRF_CHECK_DEFAULT=False,
+        WTF_CSRF_TIME_LIMIT=None,
+    )
+    csrf = CSRFProtect(app)  # also gives the templates csrf_token()
     database.init_db(database_path)
+
+    @app.before_request
+    def require_sign_in():
+        """Runs before every request. Only the sign-in page and static files are open to everyone.
+
+        A signed-out API request gets a 401 here, before any route reads tickets, changes data,
+        or calls Gemini or n8n. Every POST must also carry the page's CSRF token.
+        """
+        if request.endpoint not in ("sign_in", "static") and not session.get("signed_in"):
+            if request.path.startswith("/api/"):
+                return jsonify({"error": "Sign in first."}), 401  # 401 = "Unauthorized"
+            return redirect(url_for("sign_in"))
+        if request.method == "POST":
+            csrf.protect()  # raises CSRFError (handled below) if the token is missing or wrong
+
+    @app.errorhandler(CSRFError)
+    def csrf_failed(error):
+        """A POST without a valid CSRF token, for example from another site or an old page."""
+        message = "This page's security token is missing or out of date. Refresh the page and try again."
+        if request.path.startswith("/api/"):
+            return jsonify({"error": message}), 400
+        return render_template("sign_in.html", error=message), 400
+
+    @app.route("/sign-in", methods=["GET", "POST"])
+    def sign_in():
+        """Show the sign-in page, and check the demo password when the form is sent."""
+        if session.get("signed_in"):
+            return redirect(url_for("home"))
+        if request.method == "GET":
+            return render_template("sign_in.html")
+
+        # check_password_hash() hashes the typed password the same way and compares the results.
+        if not check_password_hash(password_hash, request.form.get("password", "")):
+            app.logger.warning("Failed sign-in attempt from %s", request.remote_addr)
+            return render_template("sign_in.html", error="That password isn't right. Try again."), 401
+
+        session.clear()  # start a fresh session, with a new CSRF token
+        session["signed_in"] = True
+        session.permanent = True  # keeps the sign-in for PERMANENT_SESSION_LIFETIME
+        return redirect(url_for("home"))
+
+    @app.post("/sign-out")
+    def sign_out():
+        """Forget the sign-in in this browser and go back to the sign-in page."""
+        session.clear()
+        flash("You're signed out.")
+        return redirect(url_for("sign_in"))
 
     def run_priority_check(ticket):
         """Send a saved ticket's id, category, and approval status to n8n, and save n8n's answer.
@@ -71,7 +161,7 @@ def create_app(database_path=None):
 
     @app.get("/")
     def home():
-        """Send the page with the ticket form and the inbox."""
+        """Send the page with the ticket form and the inbox (only after signing in)."""
         return render_template("index.html")
 
     @app.get("/api/tickets")

@@ -6,6 +6,7 @@ A small support inbox built with Python, Flask, SQLite, and vanilla JavaScript. 
 - **Milestone 2:** click **Generate draft** on a ticket to get a category (Billing, Technical, Account, or Other) and a draft reply from Gemini. Both are saved under the ticket as **Draft for review**. Nothing is ever sent to the customer.
 - **Milestone 3:** edit the draft right in the inbox, then click **Approve reply**. The text is saved exactly as typed and the ticket is marked **Approved**. Gemini's original draft is kept separately for comparison. An approved reply is read-only, and the server refuses new drafts for that ticket. Approving only updates the app's database: it doesn't call Gemini or send anything to the customer.
 - **Milestone 4:** after a draft is saved, Flask asks your n8n workflow whether the ticket needs priority review. Flagged tickets that aren't approved yet show a **Priority review** label. Approving the reply clears the flag. **Check priority** asks n8n again about a saved draft, without generating a new one.
+- **Private demo sign-in:** the inbox and every ticket API route need a sign-in with a single demo password. **Sign out** ends the session.
 
 ## Setup (Windows PowerShell)
 
@@ -30,7 +31,7 @@ If `python` isn't recognized, use `py` for the first command. If PowerShell says
 Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 ```
 
-Updating an existing copy? Activate the venv and run the `pip install` line again to add new packages (the Gemini package from milestone 2, and Waitress for serving the app).
+Updating an existing copy? Activate the venv and run the `pip install` line again to add new packages (the Gemini package from milestone 2, Waitress for serving the app, and Flask-WTF for the sign-in's CSRF protection).
 
 ## Gemini API key
 
@@ -92,16 +93,62 @@ Anything else is shown as an error and nothing is saved. In n8n, make sure that:
 
 Flask waits up to 5 seconds for an answer (`TIMEOUT_SECONDS` in `n8n_triage.py`). If n8n is stopped, slow, or answers with an error, the draft is still saved, the inbox shows why, and the agent can click **Check priority** to try again or simply approve the reply. Without `N8N_TRIAGE_WEBHOOK_URL`, everything else still works and the priority check explains what's missing.
 
+## Sign-in settings
+
+The app is a private demo: the inbox and every ticket API route need a sign-in with one shared demo password. It reads two settings from the environment, and refuses to start without them:
+
+| Variable | What it holds |
+| --- | --- |
+| `DEMO_PASSWORD_HASH` | A Werkzeug hash of the demo password, never the password itself |
+| `SECRET_KEY` | A long random value that signs the session cookie, so it can't be forged |
+
+Make both in the terminal you'll start the app from, with the venv active. Neither command shows the password or saves anything to a file.
+
+**1. Choose the password privately.** This asks for it twice without showing it, then keeps only its hash:
+
+```powershell
+$env:DEMO_PASSWORD_HASH = python -c "import getpass, sys; from werkzeug.security import generate_password_hash; first = getpass.getpass('Choose the demo password: '); second = getpass.getpass('Type it again: '); first == second or sys.exit('The two passwords were different. Run the command again.'); len(first) >= 12 or sys.exit('Use at least 12 characters. Run the command again.'); print(generate_password_hash(first))"
+```
+
+Type the password, or right-click to paste it (Ctrl+V can type an invisible character instead). Use at least 12 characters: anyone who can reach a hosted copy can try passwords.
+
+**2. Generate the session secret locally:**
+
+```powershell
+$env:SECRET_KEY = python -c "import secrets; print(secrets.token_hex(32))"
+```
+
+**3. Only when testing on this computer over plain `http://`,** allow the session cookie without HTTPS:
+
+```powershell
+$env:LOCALHOST_HTTP = "1"
+```
+
+By default the session cookie is only sent over HTTPS, which is right for a hosted copy. Never set `LOCALHOST_HTTP` on a host.
+
+To use the same values on a host, copy each into the host's environment settings, one at a time, without showing it:
+
+```powershell
+$env:DEMO_PASSWORD_HASH | Set-Clipboard
+$env:SECRET_KEY | Set-Clipboard
+```
+
+The hash contains `$` signs, so if you ever type it into PowerShell yourself, put it in single quotes. Changing `SECRET_KEY` signs everyone out.
+
+The settings last only for that terminal window. Run the commands again in a new one, choosing the same password if you want to keep it.
+
+A sign-in lasts up to 12 hours. Every change the page sends carries a CSRF token, which proves the request came from the page itself, so other websites can't act on your behalf.
+
 ## Run the app
 
-In the terminal you'll run the app from, set `GEMINI_API_KEY` and `N8N_TRIAGE_WEBHOOK_URL` first (see above). Environment variables are read when the app starts, so restart the app after changing one.
+In the terminal you'll run the app from, set `DEMO_PASSWORD_HASH`, `SECRET_KEY`, and `LOCALHOST_HTTP` (see [Sign-in settings](#sign-in-settings)), and `GEMINI_API_KEY` and `N8N_TRIAGE_WEBHOOK_URL`, first. Environment variables are read when the app starts, so restart the app after changing one.
 
 ```powershell
 .\.venv\Scripts\Activate.ps1   # needed in each new terminal
 python app.py                  # Flask's development server, with debugging on
 ```
 
-Open <http://127.0.0.1:5000>. Press `Ctrl+C` in the terminal to stop the server. This development server is only for your own computer. To serve the app, use Waitress (see [Serve with Waitress](#serve-with-waitress)).
+Open <http://127.0.0.1:5000> and sign in with the demo password. Press `Ctrl+C` in the terminal to stop the server. This development server is only for your own computer. To serve the app, use Waitress (see [Serve with Waitress](#serve-with-waitress)).
 
 Tickets, drafts, approvals, and n8n's answers are saved in `tickets.db` in the project folder, next to `app.py`, whichever folder you start the app from. `DATABASE_PATH` can choose another file (see [Database location](#database-location)). The database is created the first time the app runs, and Git ignores it. A database from an earlier milestone is upgraded automatically when the app starts. The new columns are added, and every ticket, draft, and approval is kept. Saved drafts open ready for review, and **Check priority** works on them straight away. To start over with an empty inbox, stop the app and run `Remove-Item tickets.db`.
 
@@ -109,18 +156,18 @@ Tickets, drafts, approvals, and n8n's answers are saved in `tickets.db` in the p
 
 [Waitress](https://docs.pylonsproject.org/projects/waitress/) is a production web server for Python apps, installed with the other requirements. It builds the app by calling `create_app()` in `app.py`, and it never turns on Flask's debugger.
 
-Run `waitress-serve` from the project folder, because it looks for `app.py` in the current folder. Set the environment variables first, in the same terminal or in your host's settings.
+Run `waitress-serve` from the project folder, because it looks for `app.py` in the current folder. Set the environment variables first, in the same terminal or in your host's settings. Without `DEMO_PASSWORD_HASH` and `SECRET_KEY`, both commands below stop with an error that names the missing setting.
 
-**Test it on this computer (Windows PowerShell):**
+**Test it on this computer (Windows PowerShell),** after making the sign-in settings, including `LOCALHOST_HTTP`:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
 waitress-serve --listen=127.0.0.1:8080 --call app:create_app
 ```
 
-Open <http://127.0.0.1:8080>. Press `Ctrl+C` to stop it.
+Open <http://127.0.0.1:8080> and sign in. Press `Ctrl+C` to stop it.
 
-**On a host** that gives the app its port in the `PORT` environment variable, use this start command:
+**On a host** that serves the app over HTTPS and gives it its port in the `PORT` environment variable, use this start command:
 
 ```bash
 waitress-serve --host=0.0.0.0 --port=$PORT --call app:create_app
@@ -132,6 +179,8 @@ Set these in the host's environment settings, never in project files:
 
 | Variable | Example | Purpose |
 | --- | --- | --- |
+| `DEMO_PASSWORD_HASH` | `scrypt:32768:8:1$...$...` | Required. The demo password's hash (see [Sign-in settings](#sign-in-settings)) |
+| `SECRET_KEY` | `64 random hex characters` | Required. Signs the session cookie |
 | `GEMINI_API_KEY` | `your-gemini-api-key` | Generates drafts |
 | `N8N_TRIAGE_WEBHOOK_URL` | `https://n8n.example.com/webhook/ticket-triage` | The priority check. It must be an address the host can reach: `localhost` only works when n8n runs on the same machine as the app |
 | `DATABASE_PATH` | `/var/data/tickets.db` | Where the SQLite file is kept (see below) |
@@ -148,7 +197,7 @@ The folder must already exist. The file is created and upgraded on the first sta
 
 On a host, use a path on a persistent disk. Many hosts reset the app's own folder on every deploy, which would delete the tickets. Run a single copy of the app, because SQLite can't be shared between servers.
 
-The app has no sign-in. Anyone who can open its address can read tickets, approve replies, and use your Gemini quota. Don't make it public without putting access control in front of it.
+The sign-in is one shared password for a private demo, not separate user accounts. Failed attempts are logged but not slowed down, so choose a long password, and share it only with people who should see the tickets.
 
 ## Run the tests
 
@@ -156,9 +205,13 @@ The app has no sign-in. Anyone who can open its address can read tickets, approv
 python -m pytest
 ```
 
-The tests use a temporary database, a simulated Gemini, and a simulated n8n webhook. They never touch `tickets.db`, need no API key or n8n, and never call the real services.
+The tests use a temporary database, a simulated Gemini, and a simulated n8n webhook. They never touch `tickets.db`, need no API key or n8n, and never call the real services. They use their own test password and secret key, so they don't need your sign-in settings.
 
 ## API
+
+Every route below needs a signed-in session. Without one, the server answers `401` with `{"error": "Sign in first."}` before it reads a ticket, changes anything, or calls Gemini or n8n.
+
+Every `POST` must also send the page's CSRF token in an `X-CSRFToken` header. `static/app.js` reads it from the `csrf-token` `<meta>` tag in the inbox page.
 
 | Request | Body | Success response |
 | --- | --- | --- |
@@ -181,7 +234,8 @@ The draft route is the one exception. If Gemini succeeds but the n8n check fails
 
 | Status | Meaning |
 | --- | --- |
-| `400` | A ticket field or the reply to approve is blank or whitespace-only |
+| `400` | A ticket field or the reply to approve is blank or whitespace-only, or the CSRF token is missing or out of date |
+| `401` | Not signed in |
 | `404` | No ticket has that id |
 | `409` | The ticket is already approved (no new draft, no second approval, no priority check). Or it has no draft yet. Or it was approved or got a new draft while n8n was checking it, so n8n's late answer was dropped |
 | `429` | The Gemini quota or rate limit was reached |
@@ -194,11 +248,12 @@ The draft route is the one exception. If Gemini succeeds but the n8n check fails
 
 | File | What it does |
 | --- | --- |
-| `templates/index.html` | The page: ticket form and inbox |
-| `static/app.js` | Sends tickets, draft requests, priority checks, and approvals to the API, and draws the inbox |
+| `templates/sign_in.html` | The sign-in page |
+| `templates/index.html` | The page: ticket form, inbox, and Sign out button |
+| `static/app.js` | Sends tickets, draft requests, priority checks, and approvals to the API (with the CSRF token), and draws the inbox |
 | `static/style.css` | Page styles |
-| `app.py` | Flask routes and validation |
+| `app.py` | Flask routes, sign-in, CSRF checks, and validation |
 | `database.py` | SQLite code: create and upgrade the table, save tickets, drafts, priority flags, and approvals, list tickets |
 | `ai_drafts.py` | Gemini: the prompt, the model name, structured output, and checking the answer |
 | `n8n_triage.py` | n8n: send the ticket to the webhook, wait up to 5 seconds, and check the answer |
-| `test_app.py` | Tests for tickets, drafts, approvals, and priority checks (Gemini and n8n are simulated) |
+| `test_app.py` | Tests for sign-in, tickets, drafts, approvals, and priority checks (Gemini and n8n are simulated) |

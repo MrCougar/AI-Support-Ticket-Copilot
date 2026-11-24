@@ -3,13 +3,21 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- static/app.js sends this token with every change, so the server knows the request came from this page. -->
+  <meta name="csrf-token" content="{{ csrf_token() }}">
   <title>AI Support Ticket Copilot</title>
   <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
   <header class="page-header">
-    <h1>AI Support Ticket Copilot</h1>
+    <div class="page-header-row">
+      <h1>AI Support Ticket Copilot</h1>
+      <form method="post" action="{{ url_for('sign_out') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button type="submit" class="sign-out-button">Sign out</button>
+      </form>
+    </div>
     <p>Log a customer ticket, generate an AI draft reply, let n8n flag what needs priority review, then review, edit, and approve the reply.</p>
   </header>
 

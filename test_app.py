@@ -1,16 +1,18 @@
-"""Tests for creating, validating, and listing tickets, generating drafts, approving replies,
-and checking priority with n8n.
+"""Tests for signing in, creating, validating, and listing tickets, generating drafts,
+approving replies, and checking priority with n8n.
 
 Run them with:  python -m pytest
 
 Each test gets a fresh app with its own empty database in a temporary folder,
 so the tests never touch your real tickets.db. Gemini and the n8n webhook are always
 simulated: the tests need no API key or n8n, and never call the real services.
+The sign-in settings are test-only values, never your real password or secret key.
 """
 
 import http.client
 import io
 import json
+import re
 import sqlite3
 import urllib.error
 import urllib.request
@@ -20,6 +22,7 @@ from pathlib import Path
 
 import pytest
 from google.genai import errors, types
+from werkzeug.security import generate_password_hash
 
 import ai_drafts
 import app as app_module
@@ -28,14 +31,48 @@ from app import create_app
 
 FAKE_KEY = "fake-key-for-tests"
 FAKE_WEBHOOK_URL = "http://n8n.test/webhook/ticket-triage"
+TEST_PASSWORD = "correct horse battery staple"
+TEST_SECRET_KEY = "test-only-secret-key-" * 3  # 63 characters
+# A quick-to-check hash keeps the tests fast. A real hash (scrypt, Werkzeug's default) is slower on purpose.
+TEST_PASSWORD_HASH = generate_password_hash(TEST_PASSWORD, method="pbkdf2:sha256:1000")
+
+
+@pytest.fixture(autouse=True)
+def sign_in_settings(monkeypatch):
+    """Every app in the tests starts with test-only sign-in settings, whatever is set in your terminal."""
+    monkeypatch.setenv("SECRET_KEY", TEST_SECRET_KEY)
+    monkeypatch.setenv("DEMO_PASSWORD_HASH", TEST_PASSWORD_HASH)
+    monkeypatch.delenv("LOCALHOST_HTTP", raising=False)
+    monkeypatch.delenv("DATABASE_PATH", raising=False)
+
+
+def csrf_token_in(response):
+    """The CSRF token in a page: the sign-in form's hidden field, or the inbox's <meta> tag."""
+    page = response.get_data(as_text=True)
+    return re.search(r'name="csrf[-_]token" (?:value|content)="([^"]+)"', page).group(1)
+
+
+def sign_in(test_client, password=TEST_PASSWORD):
+    """Sign in through the real sign-in form, the way a browser does, and return the response."""
+    token = csrf_token_in(test_client.get("/sign-in"))
+    return test_client.post("/sign-in", data={"password": password, "csrf_token": token})
+
+
+def signed_in_client(app):
+    """A test client that has signed in, and sends the inbox's CSRF token with every request,
+    like static/app.js does."""
+    test_client = app.test_client()
+    sign_in(test_client)
+    test_client.environ_base["HTTP_X_CSRFTOKEN"] = csrf_token_in(test_client.get("/"))
+    return test_client
 
 
 @pytest.fixture
 def client(tmp_path):
-    """A test client for an app with a brand-new, empty database."""
+    """A signed-in test client for an app with a brand-new, empty database."""
     app = create_app(tmp_path / "test.db")
     app.config["TESTING"] = True
-    return app.test_client()
+    return signed_in_client(app)
 
 
 @pytest.fixture(autouse=True)
@@ -182,11 +219,11 @@ def test_a_database_failure_returns_an_error_message(client, monkeypatch):
 def test_tickets_are_still_there_after_restarting_the_app(tmp_path):
     database_path = tmp_path / "tickets.db"
 
-    first_run = create_app(database_path).test_client()
+    first_run = signed_in_client(create_app(database_path))
     first_run.post("/api/tickets", json={"subject": "Refund", "message": "Please refund order 1042."})
 
     # A brand-new app using the same database file is the same as restarting the server.
-    second_run = create_app(database_path).test_client()
+    second_run = signed_in_client(create_app(database_path))
     tickets = second_run.get("/api/tickets").get_json()
 
     assert len(tickets) == 1
@@ -202,8 +239,8 @@ def test_database_path_chooses_the_file_when_the_app_is_started_without_one(tmp_
     monkeypatch.setenv("DATABASE_PATH", str(chosen_file))
 
     # create_app() with no arguments is how waitress-serve --call app:create_app starts the app.
-    create_app().test_client().post("/api/tickets", json={"subject": "Hosted", "message": "Saved on the host."})
-    restarted = create_app().test_client()  # a restart with the same setting
+    signed_in_client(create_app()).post("/api/tickets", json={"subject": "Hosted", "message": "Saved on the host."})
+    restarted = signed_in_client(create_app())  # a restart with the same setting
 
     assert chosen_file.exists()
     assert [ticket["subject"] for ticket in restarted.get("/api/tickets").get_json()] == ["Hosted"]
@@ -227,6 +264,163 @@ def test_without_the_setting_the_app_uses_tickets_db_beside_app_py(tmp_path, mon
     create_app()
 
     assert (tmp_path / "default.db").exists()
+
+
+# ---------- Sign-in (private demo) ----------
+
+
+@pytest.mark.parametrize(
+    "method, url",
+    [
+        ("GET", "/api/tickets"),
+        ("POST", "/api/tickets"),
+        ("POST", "/api/tickets/1/draft"),
+        ("POST", "/api/tickets/1/priority"),
+        ("POST", "/api/tickets/1/approve"),
+    ],
+)
+def test_signed_out_api_requests_get_401_before_anything_happens(
+    tmp_path, fake_gemini, fake_n8n, monkeypatch, method, url
+):
+    app = create_app(tmp_path / "test.db")
+    agent = signed_in_client(app)
+    agent.post("/api/tickets", json={"subject": "Charged twice", "message": "Order 1042."})
+    agent.post("/api/tickets/1/draft")  # ticket 1 has a draft, so every route would have work to do
+    before = agent.get("/api/tickets").get_json()
+    calls_before = (len(fake_gemini.requests), len(fake_n8n.requests))
+
+    with monkeypatch.context() as patch:
+        # If any route got as far as the database, this would fail the test.
+        def refuse(*args):
+            raise AssertionError("A signed-out request reached the database.")
+
+        for name in ["list_tickets", "get_ticket", "create_ticket", "save_draft", "save_priority_review", "approve_reply"]:
+            patch.setattr(database, name, refuse)
+
+        visitor = app.test_client()  # never signed in, so it has no session or CSRF token
+        response = visitor.open(url, method=method, json={"subject": "Hi", "message": "Hi", "approved_reply": "Hi"})
+
+    assert response.status_code == 401
+    assert response.get_json() == {"error": "Sign in first."}
+    assert (len(fake_gemini.requests), len(fake_n8n.requests)) == calls_before  # neither was called
+    assert agent.get("/api/tickets").get_json() == before  # nothing changed
+
+
+def test_signed_out_visitors_to_the_inbox_see_the_sign_in_page(tmp_path):
+    visitor = create_app(tmp_path / "test.db").test_client()
+
+    response = visitor.get("/")
+    page = visitor.get("/", follow_redirects=True).get_data(as_text=True)
+
+    assert response.status_code == 302
+    assert response.headers["Location"] == "/sign-in"
+    assert 'type="password"' in page
+    assert 'id="ticket-list"' not in page  # no inbox before signing in
+
+
+def test_an_incorrect_password_is_refused(tmp_path, caplog):
+    visitor = create_app(tmp_path / "test.db").test_client()
+
+    response = sign_in(visitor, password="not the password")
+
+    assert response.status_code == 401
+    assert "That password isn" in response.get_data(as_text=True)
+    assert visitor.get("/api/tickets").status_code == 401  # still signed out
+    assert visitor.get("/").status_code == 302
+    # The attempt is logged, but no password ever is.
+    assert "Failed sign-in attempt" in caplog.text
+    assert "not the password" not in caplog.text and TEST_PASSWORD not in caplog.text
+
+
+def test_signing_in_opens_the_inbox_and_signing_out_closes_it(tmp_path):
+    agent = create_app(tmp_path / "test.db").test_client()
+
+    # Successful sign-in: back to the inbox, with a protected session cookie.
+    response = sign_in(agent)
+    assert response.status_code == 302
+    assert response.headers["Location"] == "/"
+    cookie = response.headers["Set-Cookie"]
+    assert "HttpOnly" in cookie and "SameSite=Lax" in cookie and "Secure" in cookie
+
+    inbox = agent.get("/")
+    assert inbox.status_code == 200
+    assert 'id="ticket-list"' in inbox.get_data(as_text=True)
+    assert "Sign out" in inbox.get_data(as_text=True)
+
+    # An authenticated action, sent the way static/app.js sends it: with the page's CSRF token.
+    token = csrf_token_in(inbox)
+    created = agent.post(
+        "/api/tickets", json={"subject": "Signed in", "message": "Saved after signing in."}, headers={"X-CSRFToken": token}
+    )
+    assert created.status_code == 201
+    assert [ticket["subject"] for ticket in agent.get("/api/tickets").get_json()] == ["Signed in"]
+
+    # Sign out: back to the sign-in page, and the API is closed again.
+    signed_out = agent.post("/sign-out", data={"csrf_token": token})
+    assert signed_out.status_code == 302
+    assert signed_out.headers["Location"] == "/sign-in"
+    assert "signed out" in agent.get("/sign-in").get_data(as_text=True)
+    assert agent.get("/api/tickets").status_code == 401
+    assert agent.get("/").status_code == 302
+
+
+def test_changes_without_the_csrf_token_are_refused_even_when_signed_in(tmp_path):
+    agent = create_app(tmp_path / "test.db").test_client()
+    sign_in(agent)
+    ticket = {"subject": "Hi", "message": "Hello"}
+
+    no_token = agent.post("/api/tickets", json=ticket)
+    wrong_token = agent.post("/api/tickets", json=ticket, headers={"X-CSRFToken": "made-up-token"})
+    sign_out_without_token = agent.post("/sign-out")
+
+    for response in [no_token, wrong_token]:
+        assert response.status_code == 400
+        assert "security token" in response.get_json()["error"]
+    assert sign_out_without_token.status_code == 400
+    assert agent.get("/api/tickets").get_json() == []  # nothing was saved, and still signed in
+
+
+def test_the_sign_in_form_needs_its_csrf_token(tmp_path):
+    visitor = create_app(tmp_path / "test.db").test_client()
+
+    response = visitor.post("/sign-in", data={"password": TEST_PASSWORD})  # the right password, but no token
+
+    assert response.status_code == 400
+    assert visitor.get("/api/tickets").status_code == 401
+
+
+@pytest.mark.parametrize(
+    "name, value",
+    [
+        ("SECRET_KEY", None),
+        ("SECRET_KEY", "too-short"),
+        ("DEMO_PASSWORD_HASH", None),
+        ("DEMO_PASSWORD_HASH", TEST_PASSWORD),  # the password itself instead of its hash
+    ],
+    ids=["no-secret-key", "short-secret-key", "no-password-hash", "plain-password"],
+)
+def test_the_app_refuses_to_start_without_its_sign_in_settings(tmp_path, monkeypatch, name, value):
+    if value is None:
+        monkeypatch.delenv(name)
+    else:
+        monkeypatch.setenv(name, value)
+
+    with pytest.raises(RuntimeError, match=name) as error:
+        create_app(tmp_path / "test.db")
+
+    assert TEST_PASSWORD not in str(error.value)  # the message never repeats a setting's value
+    assert not (tmp_path / "test.db").exists()  # it stopped before opening the database
+
+
+@pytest.mark.parametrize("localhost_http, secure", [(None, True), ("1", False)], ids=["hosted", "localhost-http"])
+def test_the_session_cookie_is_https_only_unless_testing_on_localhost(tmp_path, monkeypatch, localhost_http, secure):
+    if localhost_http:
+        monkeypatch.setenv("LOCALHOST_HTTP", localhost_http)
+
+    cookie = sign_in(create_app(tmp_path / "test.db").test_client()).headers["Set-Cookie"]
+
+    assert "HttpOnly" in cookie and "SameSite=Lax" in cookie
+    assert ("; Secure" in cookie) == secure
 
 
 # ---------- Generate draft (milestone 2) ----------
@@ -444,7 +638,7 @@ def test_a_milestone_1_database_is_upgraded_without_losing_tickets(tmp_path, fak
         connection.commit()
 
     create_app(database_path)  # starting the app adds the new columns
-    client = create_app(database_path).test_client()  # starting it again must not fail or lose data
+    client = signed_in_client(create_app(database_path))  # starting it again must not fail or lose data
 
     assert client.get("/api/tickets").get_json() == [
         {
@@ -602,7 +796,7 @@ def test_a_milestone_2_database_keeps_its_drafts_ready_for_review(tmp_path, fake
         connection.commit()
 
     create_app(database_path)  # starting the app adds the approval columns
-    client = create_app(database_path).test_client()  # starting it again must not fail or lose data
+    client = signed_in_client(create_app(database_path))  # starting it again must not fail or lose data
 
     assert client.get("/api/tickets").get_json() == [
         {
@@ -911,7 +1105,7 @@ def test_a_milestone_3_database_keeps_its_tickets_and_saved_drafts_can_be_checke
         connection.commit()
 
     create_app(database_path)  # starting the app adds the priority column
-    client = create_app(database_path).test_client()  # starting it again must not fail or lose data
+    client = signed_in_client(create_app(database_path))  # starting it again must not fail or lose data
 
     assert client.get("/api/tickets").get_json() == [
         {
