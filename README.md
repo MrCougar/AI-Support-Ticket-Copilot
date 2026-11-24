@@ -2,6 +2,8 @@
 
 A small support inbox built with Python, Flask, SQLite, and vanilla JavaScript. Google Gemini drafts the replies, an n8n workflow flags tickets that need priority review, and a person reviews and approves the replies.
 
+![Wrong Pant Size refund ticket showing the Billing category, Priority review flag, and editable AI draft ready for approval](docs/images/wrong-pant-size.png)
+
 - **Milestone 1:** submit a customer ticket in the browser, see it in the inbox (newest first), and still see it after restarting the app.
 - **Milestone 2:** click **Generate draft** on a ticket to get a category (Billing, Technical, Account, or Other) and a draft reply from Gemini. Both are saved under the ticket as **Draft for review**. Nothing is ever sent to the customer.
 - **Milestone 3:** edit the draft right in the inbox, then click **Approve reply**. The text is saved exactly as typed and the ticket is marked **Approved**. Gemini's original draft is kept separately for comparison. An approved reply is read-only, and the server refuses new drafts for that ticket. Approving only updates the app's database: it doesn't call Gemini or send anything to the customer.
