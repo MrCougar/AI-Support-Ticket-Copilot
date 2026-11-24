@@ -1,0 +1,167 @@
+{
+  "name": "Support Ticket Triage",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ticket-triage",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.2,
+      "position": [
+        0,
+        0
+      ],
+      "id": "5703428e-5ccd-4b76-8403-d66ab55cbbde",
+      "name": "Webhook",
+      "webhookId": "8cc65ef6-7892-45c6-a4c4-083cf3bcc5a9"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 4
+          },
+          "conditions": [
+            {
+              "id": "debf835f-7b6c-4e71-bfc0-792da68905eb",
+              "leftValue": "={{ $json.body.category }}",
+              "rightValue": "Billing",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "f2c0a2fb-b9fa-4903-96f9-9efcd0b24a23",
+              "leftValue": "={{ $json.body.approved }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "false",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.4,
+      "position": [
+        224,
+        0
+      ],
+      "id": "8fabada3-cf11-41eb-8c2b-d10e48468336",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "81627005-2844-4300-94c2-92c5cda0b63b",
+              "name": "ticket_id",
+              "value": "={{ $json.body.ticket_id }}",
+              "type": "number"
+            },
+            {
+              "id": "ee60162c-bc98-4f7d-90c6-1ca65190e7bc",
+              "name": "priority_review",
+              "value": true,
+              "type": "boolean"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        448,
+        -96
+      ],
+      "id": "99b5e246-7f82-4c6e-8336-284adfefe7b3",
+      "name": "Edit Fields"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "ef9b4c1f-9b06-40d1-97ea-f08b224f14f3",
+              "name": "ticket_id",
+              "value": "={{ $json.body.ticket_id }}",
+              "type": "number"
+            },
+            {
+              "id": "9ea9178f-409e-44f1-81fb-772b31f99124",
+              "name": "priority_review",
+              "value": false,
+              "type": "boolean"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        448,
+        96
+      ],
+      "id": "f4d0e001-143f-4c8c-ba80-bdf208339a08",
+      "name": "Edit Fields1"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Edit Fields",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Edit Fields1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "283062fa-c7ef-4fb1-b0b8-a1c77cf24b0a",
+  "meta": {
+    "instanceId": "d1371caa34d1a510d70296797d28c367dd931c0ed349574bb05a2295aac8d14c"
+  },
+  "nodeGroups": [],
+  "id": "amVFtkjhrlmvxa7t",
+  "tags": []
+}

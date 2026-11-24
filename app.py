@@ -11,6 +11,7 @@ from flask import Flask, jsonify, render_template, request
 
 import ai_drafts
 import database
+import n8n_triage
 
 # tickets.db sits next to this file, whichever folder you start the app from.
 DEFAULT_DATABASE_PATH = Path(__file__).parent / "tickets.db"
@@ -27,6 +28,33 @@ def create_app(database_path=DEFAULT_DATABASE_PATH):
     """Build the Flask app. The tests pass in a temporary database_path."""
     app = Flask(__name__)
     database.init_db(database_path)
+
+    def run_priority_check(ticket):
+        """Send a saved ticket's id, category, and approval status to n8n, and save n8n's answer.
+
+        Used by both routes below that check priority. Raises n8n_triage.TriageError, with a
+        message for the browser, if n8n can't answer or its answer can't be saved.
+        """
+        try:
+            priority_review = n8n_triage.check_priority(ticket["id"], ticket["category"], ticket["status"] == "Approved")
+        except n8n_triage.TriageError as error:
+            # The terminal log shows the cause (for example a timeout) but never the webhook URL.
+            app.logger.warning("Priority check for ticket %s failed: %s Cause: %r", ticket["id"], error, error.__cause__)
+            raise
+
+        try:
+            saved = database.save_priority_review(database_path, ticket["id"], ticket["category"], priority_review)
+        except sqlite3.Error:
+            app.logger.exception("Saving a priority check failed")
+            raise n8n_triage.TriageError("n8n answered, but the result could not be saved. Please try again.", 500)
+        if not saved:
+            # The ticket was approved, or got a new draft, while n8n was checking it. The late
+            # answer is dropped, so it can't bring the flag back after an approval.
+            message = (
+                f"Ticket #{ticket['id']} was approved or got a new draft while n8n was checking it, "
+                "so n8n's answer wasn't saved. Refresh the page."
+            )
+            raise n8n_triage.TriageError(message, 409)
 
     @app.get("/")
     def home():
@@ -68,7 +96,8 @@ def create_app(database_path=DEFAULT_DATABASE_PATH):
 
     @app.post("/api/tickets/<int:ticket_id>/draft")
     def api_generate_draft(ticket_id):
-        """Ask Gemini for a category and draft reply, save both, and send back the updated ticket.
+        """Ask Gemini for a category and draft reply, save both, check priority with n8n,
+        and send back the updated ticket.
 
         The draft is only saved for review. Nothing is sent to the customer.
         """
@@ -97,13 +126,48 @@ def create_app(database_path=DEFAULT_DATABASE_PATH):
             message = f"Ticket #{ticket_id} was approved while Gemini was writing, so the new draft wasn't saved."
             return jsonify({"error": message}), 409
 
+        # The draft is saved. Now ask n8n whether the ticket needs priority review. If that fails,
+        # the draft stays saved, and the agent can click Check priority to try again, or approve.
+        priority_error = None
+        try:
+            run_priority_check(database.get_ticket(database_path, ticket_id))
+        except n8n_triage.TriageError as error:
+            priority_error = str(error)
+
+        ticket = database.get_ticket(database_path, ticket_id)
+        if priority_error:
+            ticket["priority_error"] = priority_error  # the browser shows it under the saved draft
+        return jsonify(ticket)
+
+    @app.post("/api/tickets/<int:ticket_id>/priority")
+    def api_check_priority(ticket_id):
+        """Ask n8n whether a ticket needs priority review, using its saved category, and send it back.
+
+        This uses the draft that's already saved: it doesn't call Gemini or change the draft.
+        """
+        ticket = database.get_ticket(database_path, ticket_id)
+        if ticket is None:
+            return jsonify({"error": f"Ticket #{ticket_id} doesn't exist."}), 404
+        if ticket["status"] == "Approved":
+            return jsonify({"error": f"Ticket #{ticket_id} is already approved, so its priority isn't checked."}), 409
+        if ticket["category"] is None:
+            message = f"Ticket #{ticket_id} has no draft yet, so there's no category to check. Generate a draft first."
+            return jsonify({"error": message}), 409
+
+        try:
+            run_priority_check(ticket)
+        except n8n_triage.TriageError as error:
+            # Nothing was saved, so the draft and any earlier answer from n8n stay as they were.
+            return jsonify({"error": str(error)}), error.status_code
+
         return jsonify(database.get_ticket(database_path, ticket_id))
 
     @app.post("/api/tickets/<int:ticket_id>/approve")
     def api_approve_reply(ticket_id):
         """Save the agent's reply exactly as typed, mark the ticket Approved, and send it back.
 
-        This only updates SQLite. It doesn't call Gemini or send anything to the customer.
+        Approving also clears the ticket's Priority review flag. This only updates SQLite:
+        it doesn't call Gemini or n8n, or send anything to the customer.
         """
         ticket = database.get_ticket(database_path, ticket_id)
         if ticket is None:

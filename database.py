@@ -44,6 +44,11 @@ def init_db(database_path):
         if "approved_reply" not in column_names:
             connection.execute("ALTER TABLE tickets ADD COLUMN approved_reply TEXT")
 
+        # Milestone 4 added the n8n priority check. priority_review is NULL until n8n answers,
+        # then 1 (needs priority review) or 0. Existing tickets, drafts, and approvals are unchanged.
+        if "priority_review" not in column_names:
+            connection.execute("ALTER TABLE tickets ADD COLUMN priority_review INTEGER")
+
         connection.commit()
 
 
@@ -63,7 +68,7 @@ def create_ticket(database_path, subject, message):
         ticket_id = cursor.lastrowid  # The id SQLite just gave the new ticket.
 
     # Read the new ticket back so it has the same fields as every other ticket
-    # (status starts as "Open", and the draft and approval fields are None).
+    # (status starts as "Open", and the draft, approval, and priority fields are None).
     return get_ticket(database_path, ticket_id)
 
 
@@ -72,14 +77,14 @@ def get_ticket(database_path, ticket_id):
     with closing(sqlite3.connect(database_path)) as connection:
         connection.row_factory = sqlite3.Row  # Lets the row be turned into a dict below.
         row = connection.execute(
-            "SELECT id, subject, message, created_at, category, draft_reply, status, approved_reply "
-            "FROM tickets WHERE id = ?",
+            "SELECT id, subject, message, created_at, category, draft_reply, status, approved_reply, "
+            "priority_review FROM tickets WHERE id = ?",
             (ticket_id,),
         ).fetchone()
 
     if row is None:
         return None
-    return dict(row)
+    return row_to_ticket(row)
 
 
 def list_tickets(database_path):
@@ -89,11 +94,23 @@ def list_tickets(database_path):
         rows = connection.execute(
             # Newest first. If two tickets were created in the same second,
             # the one with the higher id was saved later.
-            "SELECT id, subject, message, created_at, category, draft_reply, status, approved_reply "
-            "FROM tickets ORDER BY created_at DESC, id DESC"
+            "SELECT id, subject, message, created_at, category, draft_reply, status, approved_reply, "
+            "priority_review FROM tickets ORDER BY created_at DESC, id DESC"
         ).fetchall()
 
-    return [dict(row) for row in rows]
+    return [row_to_ticket(row) for row in rows]
+
+
+def row_to_ticket(row):
+    """Turn one database row into a ticket dictionary.
+
+    SQLite saves True and False as 1 and 0, so priority_review is turned back into
+    True or False here (None means n8n hasn't answered).
+    """
+    ticket = dict(row)
+    if ticket["priority_review"] is not None:
+        ticket["priority_review"] = bool(ticket["priority_review"])
+    return ticket
 
 
 def save_draft(database_path, ticket_id, category, draft_reply):
@@ -104,24 +121,45 @@ def save_draft(database_path, ticket_id, category, draft_reply):
     with closing(sqlite3.connect(database_path)) as connection:
         # One UPDATE writes both fields at once, so a category and its draft always belong together.
         # "status != 'Approved'" protects an approval, even one made while Gemini was still writing.
+        # n8n's earlier answer was about the old draft's category, so priority_review goes back to
+        # NULL until n8n checks the new one.
         cursor = connection.execute(
-            "UPDATE tickets SET category = ?, draft_reply = ? WHERE id = ? AND status != 'Approved'",
+            "UPDATE tickets SET category = ?, draft_reply = ?, priority_review = NULL "
+            "WHERE id = ? AND status != 'Approved'",
             (category, draft_reply, ticket_id),
         )
         connection.commit()
         return cursor.rowcount == 1  # rowcount is how many rows the UPDATE changed
 
 
+def save_priority_review(database_path, ticket_id, category, priority_review):
+    """Save n8n's answer (True or False) on a ticket. category is the one that was sent to n8n.
+
+    Returns True if it was saved. Returns False, and changes nothing, if the ticket was approved,
+    or got a new draft with another category, while n8n was checking it.
+    """
+    with closing(sqlite3.connect(database_path)) as connection:
+        # "status != 'Approved'" stops a late answer from bringing the flag back after an approval.
+        # "category = ?" stops an answer about an older draft from replacing the newest draft's answer.
+        cursor = connection.execute(
+            "UPDATE tickets SET priority_review = ? WHERE id = ? AND status != 'Approved' AND category = ?",
+            (priority_review, ticket_id, category),
+        )
+        connection.commit()
+        return cursor.rowcount == 1
+
+
 def approve_reply(database_path, ticket_id, approved_reply):
-    """Save the agent's final reply exactly as given, and mark the ticket Approved.
+    """Save the agent's final reply exactly as given, mark the ticket Approved, and clear its priority flag.
 
     Gemini's original draft_reply is left as it was. Returns True if it was saved.
     Returns False, and changes nothing, if the ticket has no draft or is already Approved.
     """
     with closing(sqlite3.connect(database_path)) as connection:
         # One UPDATE sets the reply and the status together, so an approved ticket always has its reply.
+        # It also clears priority_review: an approved ticket no longer needs priority review.
         cursor = connection.execute(
-            "UPDATE tickets SET approved_reply = ?, status = 'Approved' "
+            "UPDATE tickets SET approved_reply = ?, status = 'Approved', priority_review = NULL "
             "WHERE id = ? AND draft_reply IS NOT NULL AND status != 'Approved'",
             (approved_reply, ticket_id),
         )

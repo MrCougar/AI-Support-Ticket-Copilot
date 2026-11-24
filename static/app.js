@@ -1,7 +1,8 @@
 // static/app.js runs in the browser. It talks to the Flask routes in app.py:
 //   GET  /api/tickets               -> load the inbox
 //   POST /api/tickets               -> save a new ticket
-//   POST /api/tickets/<id>/draft    -> have the server ask Gemini for a draft reply
+//   POST /api/tickets/<id>/draft    -> have the server ask Gemini for a draft reply (then n8n for priority)
+//   POST /api/tickets/<id>/priority -> have the server ask n8n again, using the saved category
 //   POST /api/tickets/<id>/approve  -> save the agent's edited reply and mark the ticket Approved
 
 // The page elements this script uses (their ids are in templates/index.html).
@@ -72,6 +73,16 @@ function createTicketItem(ticket) {
   const message = document.createElement("p");
   message.className = "ticket-message";
   message.textContent = ticket.message;
+
+  // n8n's answer is saved with the ticket, so the label comes back after a refresh too.
+  // Approving clears the flag on the server, and approved tickets never show the label.
+  if (ticket.priority_review && ticket.status !== "Approved") {
+    item.classList.add("priority");
+    const badge = document.createElement("p");
+    badge.className = "priority-badge";
+    badge.textContent = "Priority review";
+    item.append(badge);
+  }
 
   item.append(subject, details, message);
 
@@ -147,20 +158,13 @@ function createTicketActions(ticket) {
 
   if (ticket.status !== "Approved") {
     if (ticket.draft_reply) {
-      const approveButton = document.createElement("button");
-      approveButton.type = "button";
-      approveButton.className = "approve-button";
-      approveButton.textContent = "Approve reply";
-      approveButton.addEventListener("click", () => approveReply(ticket.id));
-      actions.append(approveButton);
+      actions.append(
+        createButton("Approve reply", "approve-button", () => approveReply(ticket.id)),
+        createButton("Check priority", "priority-button", () => checkPriority(ticket.id)),
+      );
     }
-
-    const draftButton = document.createElement("button");
-    draftButton.type = "button";
-    draftButton.className = "draft-button";
-    draftButton.textContent = ticket.draft_reply ? "Regenerate draft" : "Generate draft";
-    draftButton.addEventListener("click", () => generateDraft(ticket.id));
-    actions.append(draftButton);
+    const draftText = ticket.draft_reply ? "Regenerate draft" : "Generate draft";
+    actions.append(createButton(draftText, "draft-button", () => generateDraft(ticket.id)));
   }
 
   const statusLine = document.createElement("p");
@@ -168,6 +172,16 @@ function createTicketActions(ticket) {
   statusLine.setAttribute("role", "status");
   actions.append(statusLine);
   return actions;
+}
+
+// One button in a ticket's action row. onClick runs when it's clicked.
+function createButton(text, className, onClick) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = className;
+  button.textContent = text;
+  button.addEventListener("click", onClick);
+  return button;
 }
 
 // Runs when a ticket's Generate draft (or Regenerate draft) button is clicked.
@@ -195,7 +209,28 @@ async function generateDraft(ticketId) {
     // Saved. Draw this ticket's card again so the editor shows the new draft.
     unsavedReplies.delete(ticketId);
     replaceTicketCard(result);
-    showTicketStatus(ticketId, "Draft saved for review. Nothing was sent to the customer.", "success");
+
+    if (result.priority_error) {
+      // The draft is saved, but n8n couldn't check it (for example, n8n isn't running).
+      showTicketStatus(
+        ticketId,
+        `Draft saved for review, but the priority check failed: ${result.priority_error} ` +
+          "Click Check priority to try again, or approve the reply.",
+        "error",
+      );
+    } else if (result.priority_review) {
+      showTicketStatus(
+        ticketId,
+        "Draft saved for review and flagged for priority review. Nothing was sent to the customer.",
+        "success",
+      );
+    } else {
+      showTicketStatus(
+        ticketId,
+        "Draft saved for review. No priority review needed. Nothing was sent to the customer.",
+        "success",
+      );
+    }
   } catch (error) {
     // No usable reply (for example, the server is stopped). Any earlier draft stays as it was.
     console.error(error);
@@ -203,6 +238,42 @@ async function generateDraft(ticketId) {
     showTicketStatus(
       ticketId,
       "Something went wrong, so no new draft was saved. Check that the server is running and try again.",
+      "error",
+    );
+  }
+}
+
+// Runs when a ticket's Check priority button is clicked. The server sends the saved category
+// to n8n, so Gemini isn't called and the draft (and any unsaved edits) stay as they are.
+async function checkPriority(ticketId) {
+  ticketsInProgress.set(ticketId, "Checking priority…");
+  showTicketStatus(ticketId, "Checking priority…", ""); // disables the buttons while n8n answers
+
+  try {
+    const response = await fetch(`/api/tickets/${ticketId}/priority`, { method: "POST" });
+    const result = await response.json();
+    ticketsInProgress.delete(ticketId);
+
+    if (!response.ok) {
+      // For example: n8n isn't running, took too long, or sent an invalid answer. Nothing was
+      // saved, and the buttons work again, so the agent can retry or approve the reply.
+      showTicketStatus(ticketId, result.error || "Priority could not be checked.", "error");
+      return;
+    }
+
+    // Saved. Draw the card again to show or hide the Priority review label.
+    replaceTicketCard(result);
+    const text = result.priority_review
+      ? "n8n flagged this ticket for priority review."
+      : "n8n says this ticket doesn't need priority review.";
+    showTicketStatus(ticketId, text, "success");
+  } catch (error) {
+    // No usable reply (for example, the server is stopped). The draft and edits are still here.
+    console.error(error);
+    ticketsInProgress.delete(ticketId);
+    showTicketStatus(
+      ticketId,
+      "Something went wrong, so priority wasn't checked. Check that the server is running and try again.",
       "error",
     );
   }

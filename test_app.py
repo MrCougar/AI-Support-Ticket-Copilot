@@ -1,14 +1,19 @@
-"""Tests for creating, validating, and listing tickets, generating drafts, and approving replies.
+"""Tests for creating, validating, and listing tickets, generating drafts, approving replies,
+and checking priority with n8n.
 
 Run them with:  python -m pytest
 
 Each test gets a fresh app with its own empty database in a temporary folder,
-so the tests never touch your real tickets.db. Gemini is always simulated:
-the tests need no API key and never call the real API.
+so the tests never touch your real tickets.db. Gemini and the n8n webhook are always
+simulated: the tests need no API key or n8n, and never call the real services.
 """
 
+import http.client
+import io
 import json
 import sqlite3
+import urllib.error
+import urllib.request
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 
@@ -20,6 +25,7 @@ import database
 from app import create_app
 
 FAKE_KEY = "fake-key-for-tests"
+FAKE_WEBHOOK_URL = "http://n8n.test/webhook/ticket-triage"
 
 
 @pytest.fixture
@@ -39,6 +45,17 @@ def never_call_the_real_gemini(monkeypatch):
         raise AssertionError("A test tried to create a real Gemini client. Use the fake_gemini fixture.")
 
     monkeypatch.setattr(ai_drafts.genai, "Client", refuse)
+
+
+@pytest.fixture(autouse=True)
+def fake_n8n(monkeypatch):
+    """Every test gets a simulated n8n webhook (FakeN8n, below), so no test makes a real HTTP request,
+    even if N8N_TRIAGE_WEBHOOK_URL is set in your terminal. Tests that change what "n8n" answers
+    ask for fake_n8n by name."""
+    monkeypatch.setenv("N8N_TRIAGE_WEBHOOK_URL", FAKE_WEBHOOK_URL)
+    fake = FakeN8n()
+    monkeypatch.setattr(urllib.request, "urlopen", fake.urlopen)
+    return fake
 
 
 def test_home_page_has_the_form_and_the_inbox(client):
@@ -402,6 +419,7 @@ def test_a_milestone_1_database_is_upgraded_without_losing_tickets(tmp_path, fak
             "draft_reply": None,
             "status": "Open",
             "approved_reply": None,
+            "priority_review": None,
         }
     ]
     # The upgraded ticket can get a draft like any other.
@@ -559,6 +577,7 @@ def test_a_milestone_2_database_keeps_its_drafts_ready_for_review(tmp_path, fake
             "draft_reply": None,
             "status": "Open",
             "approved_reply": None,
+            "priority_review": None,
         },
         {
             "id": 1,
@@ -569,9 +588,324 @@ def test_a_milestone_2_database_keeps_its_drafts_ready_for_review(tmp_path, fake
             "draft_reply": "Hi there, a saved draft.",
             "status": "Open",
             "approved_reply": None,
+            "priority_review": None,
         },
     ]
     # The saved draft is ready for review: it can be approved straight away.
     response = client.post("/api/tickets/1/approve", json={"approved_reply": "Hi there, a saved draft."})
     assert response.get_json()["status"] == "Approved"
     assert fake_gemini.requests == []  # none of this called Gemini
+
+
+# ---------- Priority check with n8n (milestone 4) ----------
+#
+# FakeN8n stands in for urllib.request.urlopen, which n8n_triage.py uses to call the webhook.
+# The fake_n8n fixture at the top of this file puts it in place for every test.
+
+
+class FakeN8n:
+    """By default "n8n" answers {"ticket_id": <the id it was sent>, "priority_review": true}.
+
+    Set priority_review, answer_text (the exact text to answer with), or error to change that.
+    """
+
+    def __init__(self):
+        self.priority_review = True
+        self.answer_text = None
+        self.error = None
+        self.requests = []  # what the app sent to the webhook
+        self.while_checking = None  # optional function to run while "n8n" is deciding
+
+    def urlopen(self, request, timeout):
+        sent = json.loads(request.data)
+        self.requests.append(
+            {
+                "url": request.full_url,
+                "method": request.get_method(),
+                "content_type": request.get_header("Content-type"),
+                "json": sent,
+                "timeout": timeout,
+            }
+        )
+        if self.while_checking:
+            self.while_checking()
+        if self.error:
+            raise self.error
+        answer_text = self.answer_text
+        if answer_text is None:
+            answer_text = json.dumps({"ticket_id": sent["ticket_id"], "priority_review": self.priority_review})
+        # BytesIO behaves like a real response here: the app reads it inside a "with" block.
+        return io.BytesIO(answer_text.encode("utf-8"))
+
+
+def test_a_new_draft_is_sent_to_n8n_and_its_priority_flag_is_saved(client, fake_gemini, fake_n8n):
+    ticket_id = add_ticket(client)
+
+    response = client.post(f"/api/tickets/{ticket_id}/draft")
+
+    assert response.status_code == 200
+    ticket = response.get_json()
+    assert ticket["priority_review"] is True
+    assert "priority_error" not in ticket
+    # What Flask sent: only the ticket id, the saved category, and approved, as JSON, with a short timeout.
+    assert fake_n8n.requests == [
+        {
+            "url": FAKE_WEBHOOK_URL,
+            "method": "POST",
+            "content_type": "application/json",
+            "json": {"ticket_id": ticket_id, "category": "Billing", "approved": False},
+            "timeout": 5,
+        }
+    ]
+    assert fake_n8n.requests[0]["json"]["approved"] is False  # JSON false, not 0
+    # Refreshing the inbox reads the saved flag without asking n8n again.
+    assert client.get("/api/tickets").get_json() == [ticket]
+    assert len(fake_n8n.requests) == 1
+
+    # A new draft is checked again, and n8n's new answer replaces the old one.
+    fake_n8n.priority_review = False
+    assert client.post(f"/api/tickets/{ticket_id}/draft").get_json()["priority_review"] is False
+    assert client.get("/api/tickets").get_json()[0]["priority_review"] is False
+
+
+# The ticket in this test is ticket 1, and each wrong answer would clear its flag if it were saved.
+@pytest.mark.parametrize(
+    "answer_text, expected_message",
+    [
+        (json.dumps({"ticket_id": 2, "priority_review": False}), "had ticket_id 2, but it must be the number 1"),
+        (json.dumps({"ticket_id": "1", "priority_review": False}), 'had ticket_id "1", but it must be the number 1'),
+        (json.dumps({"ticket_id": True, "priority_review": False}), "had ticket_id true, but it must be the number 1"),
+        (json.dumps({"ticket_id": 1, "priority_review": "false"}), 'had priority_review "false", but it must be true'),
+        (json.dumps({"ticket_id": 1, "priority_review": 0}), "had priority_review 0, but it must be true or false"),
+        (json.dumps({"ticket_id": 1}), "had priority_review null, but it must be true or false"),
+        (json.dumps({"message": "Workflow was started"}), "had ticket_id null"),
+        (json.dumps([{"ticket_id": 1, "priority_review": False}]), "wasn't a JSON object"),
+        ("", "wasn't a JSON object"),
+    ],
+    ids=[
+        "another-ticket",
+        "id-as-text",
+        "id-true",
+        "flag-as-text",
+        "flag-as-number",
+        "no-flag",
+        "responded-immediately",
+        "a-list",
+        "empty",
+    ],
+)
+def test_an_invalid_n8n_answer_is_not_saved(client, fake_gemini, fake_n8n, answer_text, expected_message):
+    ticket_id = add_ticket_with_draft(client)  # n8n flagged it, so priority_review is True
+    before = client.get("/api/tickets").get_json()
+    fake_n8n.answer_text = answer_text
+
+    response = client.post(f"/api/tickets/{ticket_id}/priority")
+
+    assert response.status_code == 502
+    assert expected_message in response.get_json()["error"]
+    assert client.get("/api/tickets").get_json() == before  # the flag and the draft are unchanged
+
+
+@pytest.mark.parametrize(
+    "simulated_error, expected_status, expected_message",
+    [
+        (TimeoutError("timed out"), 504, "didn't answer within 5 seconds"),
+        (urllib.error.URLError(TimeoutError("timed out")), 504, "didn't answer within 5 seconds"),
+        (urllib.error.URLError(ConnectionRefusedError(10061, "Connection refused")), 502, "Couldn't reach n8n"),
+        (http.client.RemoteDisconnected("Remote end closed connection"), 502, "Couldn't reach n8n"),
+        (urllib.error.HTTPError(FAKE_WEBHOOK_URL, 404, "Not Found", {}, None), 502, "no webhook at that address"),
+        (urllib.error.HTTPError(FAKE_WEBHOOK_URL, 500, "Server Error", {}, None), 502, "workflow failed (HTTP 500)"),
+    ],
+    ids=["slow-answer", "slow-connection", "n8n-stopped", "connection-dropped", "workflow-inactive", "workflow-failed"],
+)
+def test_when_n8n_is_unavailable_the_draft_is_kept_and_the_check_can_be_retried(
+    client, fake_gemini, fake_n8n, caplog, simulated_error, expected_status, expected_message
+):
+    ticket_id = add_ticket(client)
+    fake_n8n.error = simulated_error
+
+    # The draft is still saved, and the response says why priority wasn't checked.
+    drafted = client.post(f"/api/tickets/{ticket_id}/draft")
+    assert drafted.status_code == 200
+    assert drafted.get_json()["draft_reply"] == SIMULATED_DRAFT["draft_reply"]
+    assert drafted.get_json()["priority_review"] is None
+    assert expected_message in drafted.get_json()["priority_error"]
+
+    # Check priority fails the same way and changes nothing.
+    checked = client.post(f"/api/tickets/{ticket_id}/priority")
+    assert checked.status_code == expected_status
+    assert expected_message in checked.get_json()["error"]
+    saved = client.get("/api/tickets").get_json()[0]
+    assert saved["draft_reply"] == SIMULATED_DRAFT["draft_reply"]
+    assert saved["priority_review"] is None
+
+    # The failure is logged for you, but the webhook URL never reaches the browser or the log.
+    assert f"Priority check for ticket {ticket_id} failed" in caplog.text
+    for text in [drafted.get_data(as_text=True), checked.get_data(as_text=True), caplog.text]:
+        assert FAKE_WEBHOOK_URL not in text
+
+    # Once n8n is back, Check priority works, using the saved draft (Gemini isn't asked again).
+    fake_n8n.error = None
+    retried = client.post(f"/api/tickets/{ticket_id}/priority")
+    assert retried.status_code == 200
+    assert retried.get_json()["priority_review"] is True
+    assert len(fake_gemini.requests) == 1
+
+
+@pytest.mark.parametrize(
+    "webhook_url, expected_message",
+    [
+        (None, "N8N_TRIAGE_WEBHOOK_URL isn't set"),
+        ("localhost:5678/webhook/ticket-triage", "must be the webhook's full address"),
+        ("file:///C:/Windows/win.ini", "must be the webhook's full address"),
+        ("http://localhost:5678/webhook/\x16ticket-triage", "must be the webhook's full address"),
+    ],
+    ids=["not-set", "no-http", "not-a-web-address", "invisible-character"],
+)
+def test_without_a_usable_webhook_url_n8n_is_not_called_and_the_reply_can_be_approved(
+    client, fake_gemini, fake_n8n, monkeypatch, webhook_url, expected_message
+):
+    if webhook_url is None:
+        monkeypatch.delenv("N8N_TRIAGE_WEBHOOK_URL")
+    else:
+        monkeypatch.setenv("N8N_TRIAGE_WEBHOOK_URL", webhook_url)
+    ticket_id = add_ticket(client)
+
+    drafted = client.post(f"/api/tickets/{ticket_id}/draft").get_json()
+    checked = client.post(f"/api/tickets/{ticket_id}/priority")
+
+    assert expected_message in drafted["priority_error"]
+    assert checked.status_code == 503
+    assert expected_message in checked.get_json()["error"]
+    assert fake_n8n.requests == []  # nothing was sent anywhere
+    # The draft was saved, and the agent can approve it without n8n.
+    approved = client.post(f"/api/tickets/{ticket_id}/approve", json={"approved_reply": drafted["draft_reply"]})
+    assert approved.status_code == 200
+    assert approved.get_json()["status"] == "Approved"
+
+
+def test_approving_clears_the_priority_flag(client, fake_gemini, fake_n8n):
+    ticket_id = add_ticket_with_draft(client)
+    assert client.get("/api/tickets").get_json()[0]["priority_review"] is True
+
+    response = client.post(f"/api/tickets/{ticket_id}/approve", json={"approved_reply": "Approved text"})
+
+    ticket = response.get_json()
+    assert ticket["status"] == "Approved"
+    assert ticket["priority_review"] is None
+    assert client.get("/api/tickets").get_json() == [ticket]  # still cleared after a refresh
+    assert len(fake_n8n.requests) == 1  # approving didn't call n8n
+
+
+@pytest.mark.parametrize("route, expected_status", [("draft", 200), ("priority", 409)])
+def test_a_late_n8n_answer_does_not_bring_the_flag_back_after_approval(
+    client, fake_gemini, fake_n8n, tmp_path, route, expected_status
+):
+    ticket_id = add_ticket_with_draft(client)
+    # The agent approves the reply (say, in another browser tab) while n8n is still deciding,
+    # and then n8n answers "priority_review": true.
+    fake_n8n.while_checking = lambda: database.approve_reply(tmp_path / "test.db", ticket_id, "Approved text")
+
+    response = client.post(f"/api/tickets/{ticket_id}/{route}")
+
+    assert response.status_code == expected_status
+    body = response.get_json()
+    message = body["priority_error"] if route == "draft" else body["error"]
+    assert "was approved or got a new draft while n8n was checking it" in message
+    ticket = client.get("/api/tickets").get_json()[0]
+    assert ticket["status"] == "Approved"
+    assert ticket["approved_reply"] == "Approved text"
+    assert ticket["priority_review"] is None  # the late answer wasn't saved
+
+
+def test_an_answer_about_an_older_draft_is_not_saved(client, fake_gemini, fake_n8n, tmp_path):
+    ticket_id = add_ticket_with_draft(client)  # a Billing draft
+    # While n8n checks the Billing draft, a Technical draft replaces it (say, from another tab).
+    fake_n8n.while_checking = lambda: database.save_draft(tmp_path / "test.db", ticket_id, "Technical", "Newer")
+
+    response = client.post(f"/api/tickets/{ticket_id}/priority")
+
+    assert response.status_code == 409
+    ticket = client.get("/api/tickets").get_json()[0]
+    assert ticket["category"] == "Technical"
+    assert ticket["priority_review"] is None  # the answer about the Billing draft wasn't saved
+
+
+def test_check_priority_needs_an_open_ticket_with_a_draft(client, fake_gemini, fake_n8n):
+    missing = client.post("/api/tickets/999/priority")
+    assert missing.status_code == 404
+    assert missing.get_json() == {"error": "Ticket #999 doesn't exist."}
+
+    ticket_id = add_ticket(client)
+    no_draft = client.post(f"/api/tickets/{ticket_id}/priority")
+    assert no_draft.status_code == 409
+    assert "has no draft yet" in no_draft.get_json()["error"]
+
+    client.post(f"/api/tickets/{ticket_id}/draft")
+    client.post(f"/api/tickets/{ticket_id}/approve", json={"approved_reply": "Approved text"})
+    approved = client.post(f"/api/tickets/{ticket_id}/priority")
+    assert approved.status_code == 409
+    assert "is already approved" in approved.get_json()["error"]
+
+    assert len(fake_n8n.requests) == 1  # only the check that came with the draft
+
+
+def test_a_milestone_3_database_keeps_its_tickets_and_saved_drafts_can_be_checked(tmp_path, fake_gemini, fake_n8n):
+    database_path = tmp_path / "tickets.db"
+    # Build a database exactly the way milestone 3 did: drafts and approvals, but no priority column.
+    with closing(sqlite3.connect(database_path)) as connection:
+        connection.execute(
+            "CREATE TABLE tickets (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "subject TEXT NOT NULL, message TEXT NOT NULL, created_at TEXT NOT NULL)"
+        )
+        connection.execute("ALTER TABLE tickets ADD COLUMN category TEXT")
+        connection.execute("ALTER TABLE tickets ADD COLUMN draft_reply TEXT")
+        connection.execute("ALTER TABLE tickets ADD COLUMN status TEXT NOT NULL DEFAULT 'Open'")
+        connection.execute("ALTER TABLE tickets ADD COLUMN approved_reply TEXT")
+        connection.execute(
+            "INSERT INTO tickets (subject, message, created_at, category, draft_reply, status, approved_reply) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("Charged twice", "Order 1042.", "2026-11-20T09:00:00+00:00", "Billing", "Hi, a draft.", "Approved", "Hi!"),
+        )
+        connection.execute(
+            "INSERT INTO tickets (subject, message, created_at, category, draft_reply) VALUES (?, ?, ?, ?, ?)",
+            ("App crashes", "On export.", "2026-11-21T09:00:00+00:00", "Technical", "Hi, a saved draft."),
+        )
+        connection.commit()
+
+    create_app(database_path)  # starting the app adds the priority column
+    client = create_app(database_path).test_client()  # starting it again must not fail or lose data
+
+    assert client.get("/api/tickets").get_json() == [
+        {
+            "id": 2,
+            "subject": "App crashes",
+            "message": "On export.",
+            "created_at": "2026-11-21T09:00:00+00:00",
+            "category": "Technical",
+            "draft_reply": "Hi, a saved draft.",
+            "status": "Open",
+            "approved_reply": None,
+            "priority_review": None,
+        },
+        {
+            "id": 1,
+            "subject": "Charged twice",
+            "message": "Order 1042.",
+            "created_at": "2026-11-20T09:00:00+00:00",
+            "category": "Billing",
+            "draft_reply": "Hi, a draft.",
+            "status": "Approved",
+            "approved_reply": "Hi!",
+            "priority_review": None,
+        },
+    ]
+
+    # Check priority on the saved draft: n8n gets the saved category, and Gemini isn't called.
+    response = client.post("/api/tickets/2/priority")
+
+    assert response.status_code == 200
+    assert response.get_json()["priority_review"] is True
+    assert response.get_json()["draft_reply"] == "Hi, a saved draft."
+    assert fake_n8n.requests[0]["json"] == {"ticket_id": 2, "category": "Technical", "approved": False}
+    assert fake_gemini.requests == []

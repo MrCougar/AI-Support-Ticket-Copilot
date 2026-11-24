@@ -13,6 +13,9 @@
   --approved-bg: #f5fcf8;
   --approved-border: #7cc39b;
   --approved-soft: #dcf3e5;
+  --priority-text: #b93815;
+  --priority-bg: #fef6ee;
+  --priority-border: #f7b27a;
   --error-text: #b42318;
   --error-bg: #fef3f2;
   --success-text: #067647;
@@ -203,6 +206,26 @@ button:disabled {
   overflow-wrap: anywhere; /* wrap very long words and links */
 }
 
+/* ---------- Priority review (n8n's answer) ---------- */
+
+/* A flagged ticket gets an orange edge, and an orange label above its subject. */
+.ticket.priority {
+  border-color: var(--priority-border);
+  box-shadow: inset 4px 0 0 var(--priority-text);
+}
+
+.priority-badge {
+  width: fit-content; /* only as wide as its text */
+  margin: 0 0 6px;
+  padding: 1px 10px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--priority-text);
+  background: var(--priority-bg);
+  border: 1px solid var(--priority-border);
+  border-radius: 999px;
+}
+
 /* ---------- AI drafts, review, and approval ---------- */
 
 .ticket-actions {
@@ -218,22 +241,25 @@ button:disabled {
 }
 
 .approve-button,
+.priority-button,
 .draft-button {
   padding: 6px 14px;
   font-size: 0.9rem;
-  border: 1px solid var(--accent); /* both buttons get a border, so they're the same height */
+  border: 1px solid var(--accent); /* every button gets a border, so they're all the same height */
 }
 
 .approve-button:hover {
   border-color: var(--accent-dark); /* matches the darker background from button:hover */
 }
 
-/* Generate/Regenerate is the secondary button: outlined instead of filled. */
+/* Check priority and Generate/Regenerate are secondary buttons: outlined instead of filled. */
+.priority-button,
 .draft-button {
   color: var(--accent);
   background: #fff;
 }
 
+.priority-button:hover,
 .draft-button:hover {
   background: var(--accent-soft);
 }
