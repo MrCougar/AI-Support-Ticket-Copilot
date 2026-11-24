@@ -33,6 +33,47 @@ Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 
 Updating an existing copy? Activate the venv and run the `pip install` line again to add new packages (the Gemini package from milestone 2, Waitress for serving the app, and Flask-WTF for the sign-in's CSRF protection).
 
+## Start the demo on Windows
+
+After the setup above, double-click **`Start Ticket Copilot.cmd`** in the project folder in File Explorer. You don't need VS Code or a terminal. A window opens and starts the app with Waitress at <http://127.0.0.1:8080>, using `tickets.db` in the project folder. Your default browser opens on the sign-in page as soon as the app is ready.
+
+### First launch
+
+The first time, the window asks for the settings it doesn't have yet, then saves them, so later launches start straight away:
+
+1. **Gemini API key.** Copy the key (for example with AI Studio's copy button), then press Enter in the window. The launcher reads it from the clipboard, so there's nothing to paste, and it shows only the key's length, never the key.
+2. **n8n webhook.** Press Enter to use `http://localhost:18080/webhook/ticket-triage`, the included workflow on your local n8n, or type a different Production URL (see [n8n priority check](#n8n-priority-check)).
+3. **Demo password.** Choose one of at least 12 characters and type it twice. Only its hash is saved, never the password.
+4. The session secret (`SECRET_KEY`) is generated for you.
+
+Starting from a PowerShell window that still has these settings as `$env:` variables, for example with `& ".\Start Ticket Copilot.cmd"`? The launcher saves those values instead of asking for them, including your current demo password's hash.
+
+The settings are saved in `%LOCALAPPDATA%\AI Support Ticket Copilot\settings.dat`, outside the project folder and Git. The file is encrypted with Windows' data protection (DPAPI), so only your Windows account on this computer can read it. To change a setting, such as a new Gemini key or demo password, delete the file and start again. The launcher then asks for everything once more:
+
+```powershell
+Remove-Item "$env:LOCALAPPDATA\AI Support Ticket Copilot\settings.dat"
+```
+
+### Start and stop
+
+- **Start:** double-click `Start Ticket Copilot.cmd`, then sign in with the demo password. Start n8n (on port 18080) too, before or after. If n8n isn't answering, the window says so. Everything else still works, and **Check priority** can try again later.
+- **Already running?** Double-clicking again just opens the browser.
+- **Stop:** close the launcher window, or press Ctrl+C in it. If the window then asks *Terminate batch job (Y/N)?*, press Y.
+- If the window says port 8080 is in use, another program is using it, such as a `waitress-serve` you started in a terminal. Stop that one first.
+
+### Demo walkthrough
+
+1. Sign in with the demo password.
+2. Under **New ticket**, enter a fictional refund request and click **Submit ticket**. For example:
+   - **Subject:** `Refund for a double charge`
+   - **Customer message:** `Hi, I was charged twice for my March subscription. Please refund the extra charge. Thanks, Sam`
+3. On the new ticket in the **Inbox**, click **Generate draft**. Gemini chooses a category and writes a reply, shown under **Draft for review** with **Category: Billing**.
+4. Flask sends the ticket's category to n8n, and the ticket shows the **Priority review** label before anyone approves it. Billing tickets that aren't approved yet are flagged. If Gemini chose another category, click **Regenerate draft**. If n8n wasn't running, start it and click **Check priority**.
+5. Edit the reply in the text box if you like, then click **Approve reply**. The ticket is marked **Approved** and the priority label goes away. The reply is only saved in the app: nothing is sent to the customer.
+6. Click **Sign out** when you're done.
+
+The sections below explain each setting, and how to run the app from a terminal or on a host instead.
+
 ## Gemini API key
 
 Drafts need a Gemini API key from [Google AI Studio](https://aistudio.google.com/apikey). The app reads it on the server from the `GEMINI_API_KEY` environment variable, so it never reaches the browser.
@@ -205,7 +246,7 @@ The sign-in is one shared password for a private demo, not separate user account
 python -m pytest
 ```
 
-The tests use a temporary database, a simulated Gemini, and a simulated n8n webhook. They never touch `tickets.db`, need no API key or n8n, and never call the real services. They use their own test password and secret key, so they don't need your sign-in settings.
+The tests use a temporary database, a simulated Gemini, and a simulated n8n webhook. They never touch `tickets.db`, need no API key or n8n, and never call the real services. They use their own test password and secret key, so they don't need your sign-in settings. The launcher tests simulate the prompts, the browser, and Waitress, and never read your saved settings.
 
 ## API
 
@@ -257,3 +298,7 @@ The draft route is the one exception. If Gemini succeeds but the n8n check fails
 | `ai_drafts.py` | Gemini: the prompt, the model name, structured output, and checking the answer |
 | `n8n_triage.py` | n8n: send the ticket to the webhook, wait up to 5 seconds, and check the answer |
 | `test_app.py` | Tests for sign-in, tickets, drafts, approvals, and priority checks (Gemini and n8n are simulated) |
+| `Start Ticket Copilot.cmd` | Double-click to start the demo on Windows: runs `launcher.py` with the project's `.venv` |
+| `launcher.py` | Asks once for missing settings, saves them encrypted outside the project, starts Waitress on 127.0.0.1:8080, and opens the browser |
+| `test_launcher.py` | Tests for the launcher's saved settings, first-launch questions, and start-up (prompts, browser, and Waitress are simulated) |
+| `.gitattributes` | Keeps Windows line endings in the `.cmd` file, which `cmd.exe` needs |
