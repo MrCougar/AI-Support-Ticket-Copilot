@@ -7,6 +7,7 @@ To serve it with Waitress (debugging off), see "Serve with Waitress" in README.m
     waitress-serve --listen=127.0.0.1:8080 --call app:create_app
 """
 
+import math
 import os
 import sqlite3
 from datetime import timedelta
@@ -19,6 +20,7 @@ from werkzeug.security import check_password_hash
 import ai_drafts
 import database
 import n8n_triage
+import sign_in_limits
 
 # tickets.db sits next to this file, whichever folder you start the app from.
 # To keep the database somewhere else (for example on a host's persistent disk),
@@ -83,6 +85,7 @@ def create_app(database_path=None):
         WTF_CSRF_TIME_LIMIT=None,
     )
     csrf = CSRFProtect(app)  # also gives the templates csrf_token()
+    failed_sign_ins = sign_in_limits.FailedSignIns()  # wrong passwords per address, for rate limiting
     database.init_db(database_path)
 
     @app.before_request
@@ -115,15 +118,34 @@ def create_app(database_path=None):
         if request.method == "GET":
             return render_template("sign_in.html")
 
+        # Rate limiting: after too many wrong passwords from this address, don't even check
+        # the password, so guessing gets nowhere (see sign_in_limits.py).
+        address = request.remote_addr
+        if failed_sign_ins.seconds_until_allowed(address):
+            app.logger.warning("Sign-in refused for %s: too many wrong passwords", address)
+            return too_many_attempts(address)
+
         # check_password_hash() hashes the typed password the same way and compares the results.
         if not check_password_hash(password_hash, request.form.get("password", "")):
-            app.logger.warning("Failed sign-in attempt from %s", request.remote_addr)
+            app.logger.warning("Failed sign-in attempt from %s", address)
+            failed_sign_ins.record_failure(address)
+            if failed_sign_ins.seconds_until_allowed(address):
+                return too_many_attempts(address)  # that was the last allowed try
             return render_template("sign_in.html", error="That password isn't right. Try again."), 401
 
+        failed_sign_ins.clear(address)
         session.clear()  # start a fresh session, with a new CSRF token
         session["signed_in"] = True
         session.permanent = True  # keeps the sign-in for PERMANENT_SESSION_LIFETIME
         return redirect(url_for("home"))
+
+    def too_many_attempts(address):
+        """The sign-in page saying how long to wait. 429 = "Too Many Requests"."""
+        wait_seconds = max(1, failed_sign_ins.seconds_until_allowed(address))
+        minutes = math.ceil(wait_seconds / 60)
+        message = f"Too many wrong passwords. Try again in {minutes} minute{'' if minutes == 1 else 's'}."
+        # Retry-After tells browsers and scripts how many seconds to wait.
+        return render_template("sign_in.html", error=message), 429, {"Retry-After": str(wait_seconds)}
 
     @app.post("/sign-out")
     def sign_out():

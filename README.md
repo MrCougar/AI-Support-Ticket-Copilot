@@ -238,7 +238,11 @@ The folder must already exist. The file is created and upgraded on the first sta
 
 On a host, use a path on a persistent disk. Many hosts reset the app's own folder on every deploy, which would delete the tickets. Run a single copy of the app, because SQLite can't be shared between servers.
 
-The sign-in is one shared password for a private demo, not separate user accounts. Failed attempts are logged but not slowed down, so choose a long password, and share it only with people who should see the tickets.
+The sign-in is one shared password for a private demo, not separate user accounts. Choose a long password, and share it only with people who should see the tickets.
+
+Wrong passwords are logged and rate limited. Each address may enter 5 wrong passwords within 15 minutes. After that, the sign-in page answers `429 Too Many Requests` with *Too many wrong passwords. Try again in N minutes.*, and it doesn't even check passwords from that address until then. A correct password resets the count. The counts are kept in memory, so restarting the app clears them. The limits are `MAX_FAILURES` and `WINDOW_SECONDS` in `sign_in_limits.py`.
+
+On a host, the app sees each visitor's address only if Waitress trusts the host's proxy. Otherwise every visitor appears to come from the proxy, and 5 wrong passwords from anyone lock everyone out for 15 minutes. If your host puts a proxy in front of the app, add Waitress's proxy options to the start command, using the proxy address and header from your host's documentation. For example: `--trusted-proxy=10.0.0.1 --trusted-proxy-headers=x-forwarded-for`.
 
 ## Run the tests
 
@@ -294,10 +298,11 @@ The draft route is the one exception. If Gemini succeeds but the n8n check fails
 | `static/app.js` | Sends tickets, draft requests, priority checks, and approvals to the API (with the CSRF token), and draws the inbox |
 | `static/style.css` | Page styles |
 | `app.py` | Flask routes, sign-in, CSRF checks, and validation |
+| `sign_in_limits.py` | Rate limiting for the sign-in page: counts wrong passwords per address |
 | `database.py` | SQLite code: create and upgrade the table, save tickets, drafts, priority flags, and approvals, list tickets |
 | `ai_drafts.py` | Gemini: the prompt, the model name, structured output, and checking the answer |
 | `n8n_triage.py` | n8n: send the ticket to the webhook, wait up to 5 seconds, and check the answer |
-| `test_app.py` | Tests for sign-in, tickets, drafts, approvals, and priority checks (Gemini and n8n are simulated) |
+| `test_app.py` | Tests for sign-in (including rate limiting), tickets, drafts, approvals, and priority checks (Gemini and n8n are simulated) |
 | `Start Ticket Copilot.cmd` | Double-click to start the demo on Windows: runs `launcher.py` with the project's `.venv` |
 | `launcher.py` | Asks once for missing settings, saves them encrypted outside the project, starts Waitress on 127.0.0.1:8080, and opens the browser |
 | `test_launcher.py` | Tests for the launcher's saved settings, first-launch questions, and start-up (prompts, browser, and Waitress are simulated) |

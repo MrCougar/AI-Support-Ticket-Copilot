@@ -22,11 +22,12 @@ from pathlib import Path
 
 import pytest
 from google.genai import errors, types
-from werkzeug.security import generate_password_hash
+from werkzeug.security import check_password_hash, generate_password_hash
 
 import ai_drafts
 import app as app_module
 import database
+import sign_in_limits
 from app import create_app
 
 FAKE_KEY = "fake-key-for-tests"
@@ -330,6 +331,101 @@ def test_an_incorrect_password_is_refused(tmp_path, caplog):
     # The attempt is logged, but no password ever is.
     assert "Failed sign-in attempt" in caplog.text
     assert "not the password" not in caplog.text and TEST_PASSWORD not in caplog.text
+
+
+class FakeClock:
+    """Stands in for sign_in_limits.now(), so a test can move time forward."""
+
+    def __init__(self):
+        self.seconds = 1000.0
+
+    def __call__(self):
+        return self.seconds
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    fake = FakeClock()
+    monkeypatch.setattr(sign_in_limits, "now", fake)
+    return fake
+
+
+@pytest.fixture
+def password_checks(monkeypatch):
+    """Counts how many times the app actually checks a password."""
+    calls = []
+
+    def counting_check(password_hash, password):
+        calls.append(password)
+        return check_password_hash(password_hash, password)
+
+    monkeypatch.setattr(app_module, "check_password_hash", counting_check)
+    return calls
+
+
+def test_too_many_wrong_passwords_block_that_address(tmp_path, clock, password_checks, caplog):
+    app = create_app(tmp_path / "test.db")
+    guesser = app.test_client()
+
+    for attempt in range(sign_in_limits.MAX_FAILURES - 1):
+        assert sign_in(guesser, password=f"guess {attempt}").status_code == 401
+
+    # The last allowed wrong password says how long to wait.
+    last_try = sign_in(guesser, password="last guess")
+    assert last_try.status_code == 429
+    assert "Too many wrong passwords. Try again in 15 minutes." in last_try.get_data(as_text=True)
+    assert last_try.headers["Retry-After"] == str(sign_in_limits.WINDOW_SECONDS)
+
+    # Now even the right password isn't checked, so guessing gets nowhere.
+    clock.seconds += 60
+    checks_before = len(password_checks)
+    blocked = sign_in(guesser)
+    assert blocked.status_code == 429
+    assert "Try again in 14 minutes." in blocked.get_data(as_text=True)
+    assert len(password_checks) == checks_before
+    assert guesser.get("/api/tickets").status_code == 401  # still signed out
+    assert "Sign-in refused for 127.0.0.1: too many wrong passwords" in caplog.text
+
+    # Other addresses can still sign in.
+    agent = app.test_client()
+    agent.environ_base["REMOTE_ADDR"] = "10.0.0.2"
+    assert sign_in(agent).status_code == 302
+
+
+def test_the_block_ends_when_the_wrong_passwords_are_old_enough(tmp_path, clock):
+    guesser = create_app(tmp_path / "test.db").test_client()
+    for attempt in range(sign_in_limits.MAX_FAILURES):
+        sign_in(guesser, password=f"guess {attempt}")
+        clock.seconds += 10
+
+    # The guesses were 10 seconds apart. Once the first is over 15 minutes old, one more try is
+    # allowed. It's wrong, so the block starts again, until the next oldest guess ages out too.
+    clock.seconds += sign_in_limits.WINDOW_SECONDS - 49
+    assert sign_in(guesser, password="one more guess").status_code == 429
+    assert sign_in(guesser).status_code == 429
+    clock.seconds += 60
+    assert sign_in(guesser).status_code == 302
+
+
+def test_a_correct_password_clears_the_count(tmp_path, clock):
+    agent = create_app(tmp_path / "test.db").test_client()
+    for attempt in range(sign_in_limits.MAX_FAILURES - 1):
+        sign_in(agent, password=f"typo {attempt}")
+    assert sign_in(agent).status_code == 302
+    agent.post("/sign-out", data={"csrf_token": csrf_token_in(agent.get("/"))})
+
+    # The earlier typos no longer count.
+    for attempt in range(sign_in_limits.MAX_FAILURES - 1):
+        assert sign_in(agent, password=f"typo {attempt}").status_code == 401
+
+
+def test_old_wrong_passwords_are_forgotten(clock):
+    failed = sign_in_limits.FailedSignIns()
+    failed.record_failure("10.0.0.3")
+    clock.seconds += sign_in_limits.WINDOW_SECONDS + 1
+    failed.record_failure("10.0.0.4")
+
+    assert list(failed.failures) == ["10.0.0.4"]  # memory only holds recent attempts
 
 
 def test_signing_in_opens_the_inbox_and_signing_out_closes_it(tmp_path):
