@@ -9,7 +9,14 @@ A small support inbox built with Python, Flask, SQLite, and vanilla JavaScript. 
 
 ## Setup (Windows PowerShell)
 
-Run these once, from the project folder:
+You need Python 3 (tested with Python 3.14) and Git. Get the code:
+
+```powershell
+git clone https://github.com/MrCougar/AI-Support-Ticket-Copilot.git
+cd AI-Support-Ticket-Copilot
+```
+
+Then run these once, from the project folder:
 
 ```powershell
 python -m venv .venv
@@ -45,11 +52,20 @@ Never put the key in a project file or commit it. Without a key, everything else
 
 ## n8n priority check
 
-Flask sends each saved draft's ticket to an n8n webhook. Set its address in the terminal you'll start the app from, using the **Production URL** from your workflow's Webhook node:
+Flask sends each saved draft's ticket to an n8n webhook. The workflow is included as `workflows/Support Ticket Triage.json`. It flags `Billing` tickets that aren't approved yet, and answers `false` for everything else.
+
+To use it:
+1. In n8n, import the file (**Import from File** in the workflow editor's menu).
+2. Make sure the workflow is active.
+3. Copy the **Production URL** from its Webhook node.
+
+Set that address in the terminal you'll start the app from. On Windows, with n8n running locally on port 18080, it is:
 
 ```powershell
-$env:N8N_TRIAGE_WEBHOOK_URL = "http://localhost:5678/webhook/your-webhook-path"
+$env:N8N_TRIAGE_WEBHOOK_URL = "http://localhost:18080/webhook/ticket-triage"
 ```
+
+Use your own n8n address and port if they differ. The path `ticket-triage` comes from the included workflow's Webhook node.
 
 If the webhook has no authentication, anyone with the URL can run the workflow, so keep it out of project files. The app never sends it to the browser or writes it to the logs.
 
@@ -78,6 +94,8 @@ Flask waits up to 5 seconds for an answer (`TIMEOUT_SECONDS` in `n8n_triage.py`)
 
 ## Run the app
 
+In the terminal you'll run the app from, set `GEMINI_API_KEY` and `N8N_TRIAGE_WEBHOOK_URL` first (see above). Environment variables are read when the app starts, so restart the app after changing one.
+
 ```powershell
 .\.venv\Scripts\Activate.ps1   # needed in each new terminal
 python app.py
@@ -85,7 +103,7 @@ python app.py
 
 Open <http://127.0.0.1:5000>. Press `Ctrl+C` in the terminal to stop the server.
 
-Tickets, drafts, approvals, and n8n's answers are saved in `tickets.db`, which is created the first time the app runs. A database from an earlier milestone is upgraded automatically when the app starts. The new columns are added, and every ticket, draft, and approval is kept. Saved drafts open ready for review, and **Check priority** works on them straight away. To start over with an empty inbox, stop the app and run `Remove-Item tickets.db`.
+Tickets, drafts, approvals, and n8n's answers are saved in `tickets.db` in the project folder, next to `app.py`, whichever folder you start the app from. It's created the first time the app runs, and Git ignores it. A database from an earlier milestone is upgraded automatically when the app starts. The new columns are added, and every ticket, draft, and approval is kept. Saved drafts open ready for review, and **Check priority** works on them straight away. To start over with an empty inbox, stop the app and run `Remove-Item tickets.db`.
 
 ## Run the tests
 
