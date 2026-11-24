@@ -1,9 +1,13 @@
 """Flask web server for the AI Support Ticket Copilot.
 
-Start it with:  python app.py
-Then open:      http://127.0.0.1:5000
+For development (debug mode):  python app.py
+Then open:                      http://127.0.0.1:5000
+
+To serve it with Waitress (debugging off), see "Serve with Waitress" in README.md:
+    waitress-serve --listen=127.0.0.1:8080 --call app:create_app
 """
 
+import os
 import sqlite3
 from pathlib import Path
 
@@ -14,6 +18,8 @@ import database
 import n8n_triage
 
 # tickets.db sits next to this file, whichever folder you start the app from.
+# To keep the database somewhere else (for example on a host's persistent disk),
+# set the DATABASE_PATH environment variable to the SQLite file's full path.
 DEFAULT_DATABASE_PATH = Path(__file__).parent / "tickets.db"
 
 
@@ -24,8 +30,15 @@ def clean_text(value):
     return ""
 
 
-def create_app(database_path=DEFAULT_DATABASE_PATH):
-    """Build the Flask app. The tests pass in a temporary database_path."""
+def create_app(database_path=None):
+    """Build the Flask app.
+
+    The tests pass in a temporary database_path. Waitress calls create_app() with no
+    arguments, so then the DATABASE_PATH environment variable chooses the SQLite file,
+    and without it the app uses tickets.db next to this file.
+    """
+    if database_path is None:
+        database_path = os.environ.get("DATABASE_PATH", "").strip() or DEFAULT_DATABASE_PATH
     app = Flask(__name__)
     database.init_db(database_path)
 

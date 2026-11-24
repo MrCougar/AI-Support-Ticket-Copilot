@@ -30,7 +30,7 @@ If `python` isn't recognized, use `py` for the first command. If PowerShell says
 Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 ```
 
-Coming from milestone 1? Activate the venv and run the `pip install` line again to add the Gemini package.
+Updating an existing copy? Activate the venv and run the `pip install` line again to add new packages (the Gemini package from milestone 2, and Waitress for serving the app).
 
 ## Gemini API key
 
@@ -98,12 +98,57 @@ In the terminal you'll run the app from, set `GEMINI_API_KEY` and `N8N_TRIAGE_WE
 
 ```powershell
 .\.venv\Scripts\Activate.ps1   # needed in each new terminal
-python app.py
+python app.py                  # Flask's development server, with debugging on
 ```
 
-Open <http://127.0.0.1:5000>. Press `Ctrl+C` in the terminal to stop the server.
+Open <http://127.0.0.1:5000>. Press `Ctrl+C` in the terminal to stop the server. This development server is only for your own computer. To serve the app, use Waitress (see [Serve with Waitress](#serve-with-waitress)).
 
-Tickets, drafts, approvals, and n8n's answers are saved in `tickets.db` in the project folder, next to `app.py`, whichever folder you start the app from. It's created the first time the app runs, and Git ignores it. A database from an earlier milestone is upgraded automatically when the app starts. The new columns are added, and every ticket, draft, and approval is kept. Saved drafts open ready for review, and **Check priority** works on them straight away. To start over with an empty inbox, stop the app and run `Remove-Item tickets.db`.
+Tickets, drafts, approvals, and n8n's answers are saved in `tickets.db` in the project folder, next to `app.py`, whichever folder you start the app from. `DATABASE_PATH` can choose another file (see [Database location](#database-location)). The database is created the first time the app runs, and Git ignores it. A database from an earlier milestone is upgraded automatically when the app starts. The new columns are added, and every ticket, draft, and approval is kept. Saved drafts open ready for review, and **Check priority** works on them straight away. To start over with an empty inbox, stop the app and run `Remove-Item tickets.db`.
+
+## Serve with Waitress
+
+[Waitress](https://docs.pylonsproject.org/projects/waitress/) is a production web server for Python apps, installed with the other requirements. It builds the app by calling `create_app()` in `app.py`, and it never turns on Flask's debugger.
+
+Run `waitress-serve` from the project folder, because it looks for `app.py` in the current folder. Set the environment variables first, in the same terminal or in your host's settings.
+
+**Test it on this computer (Windows PowerShell):**
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+waitress-serve --listen=127.0.0.1:8080 --call app:create_app
+```
+
+Open <http://127.0.0.1:8080>. Press `Ctrl+C` to stop it.
+
+**On a host** that gives the app its port in the `PORT` environment variable, use this start command:
+
+```bash
+waitress-serve --host=0.0.0.0 --port=$PORT --call app:create_app
+```
+
+In PowerShell, write `--port=$env:PORT` instead.
+
+Set these in the host's environment settings, never in project files:
+
+| Variable | Example | Purpose |
+| --- | --- | --- |
+| `GEMINI_API_KEY` | `your-gemini-api-key` | Generates drafts |
+| `N8N_TRIAGE_WEBHOOK_URL` | `https://n8n.example.com/webhook/ticket-triage` | The priority check. It must be an address the host can reach: `localhost` only works when n8n runs on the same machine as the app |
+| `DATABASE_PATH` | `/var/data/tickets.db` | Where the SQLite file is kept (see below) |
+
+### Database location
+
+Without `DATABASE_PATH`, the app uses `tickets.db` next to `app.py`. To keep the database somewhere else, set `DATABASE_PATH` to the file's full path before starting the app:
+
+```powershell
+$env:DATABASE_PATH = "D:\ticket-data\tickets.db"
+```
+
+The folder must already exist. The file is created and upgraded on the first start, and the same path keeps the same tickets across restarts.
+
+On a host, use a path on a persistent disk. Many hosts reset the app's own folder on every deploy, which would delete the tickets. Run a single copy of the app, because SQLite can't be shared between servers.
+
+The app has no sign-in. Anyone who can open its address can read tickets, approve replies, and use your Gemini quota. Don't make it public without putting access control in front of it.
 
 ## Run the tests
 

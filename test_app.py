@@ -16,11 +16,13 @@ import urllib.error
 import urllib.request
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from google.genai import errors, types
 
 import ai_drafts
+import app as app_module
 import database
 from app import create_app
 
@@ -190,6 +192,41 @@ def test_tickets_are_still_there_after_restarting_the_app(tmp_path):
     assert len(tickets) == 1
     assert tickets[0]["subject"] == "Refund"
     assert tickets[0]["message"] == "Please refund order 1042."
+
+
+# ---------- Choosing the database file (hosting) ----------
+
+
+def test_database_path_chooses_the_file_when_the_app_is_started_without_one(tmp_path, monkeypatch):
+    chosen_file = tmp_path / "hosted-tickets.db"
+    monkeypatch.setenv("DATABASE_PATH", str(chosen_file))
+
+    # create_app() with no arguments is how waitress-serve --call app:create_app starts the app.
+    create_app().test_client().post("/api/tickets", json={"subject": "Hosted", "message": "Saved on the host."})
+    restarted = create_app().test_client()  # a restart with the same setting
+
+    assert chosen_file.exists()
+    assert [ticket["subject"] for ticket in restarted.get("/api/tickets").get_json()] == ["Hosted"]
+
+
+def test_a_database_path_passed_in_wins_over_the_setting(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "from-setting.db"))
+
+    create_app(tmp_path / "passed-in.db")  # what the tests do
+
+    assert (tmp_path / "passed-in.db").exists()
+    assert not (tmp_path / "from-setting.db").exists()
+
+
+def test_without_the_setting_the_app_uses_tickets_db_beside_app_py(tmp_path, monkeypatch):
+    monkeypatch.delenv("DATABASE_PATH", raising=False)
+    assert app_module.DEFAULT_DATABASE_PATH == Path(app_module.__file__).parent / "tickets.db"
+
+    # Point the default at a temporary file, so this test never opens your real tickets.db.
+    monkeypatch.setattr(app_module, "DEFAULT_DATABASE_PATH", tmp_path / "default.db")
+    create_app()
+
+    assert (tmp_path / "default.db").exists()
 
 
 # ---------- Generate draft (milestone 2) ----------
